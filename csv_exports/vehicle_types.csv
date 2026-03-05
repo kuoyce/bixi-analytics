@@ -1,0 +1,6 @@
+vehicle_type_id,name,form_factor,propulsion_type,max_range_meters,name_length,last_updated
+7,,bicycle,electric_assist,0,,1772522410
+9,,bicycle,human,0,,1772522410
+11,,bicycle,electric_assist,70000,,1772522410
+14,,cargo_bicycle,human,0,,1772522410
+4,,bicycle,electric_assist,0,,1772522410
