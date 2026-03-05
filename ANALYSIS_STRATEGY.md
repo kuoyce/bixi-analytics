@@ -438,7 +438,8 @@ duckdb.sql("SELECT * FROM read_parquet('data/**/*.parquet') LIMIT 5").show()
 ---
 
 ## 💾 Data Location
-- **Parquet files**: `./bixi-analytics/data/`
+- **Bronze Parquet files**: `./bixi-analytics/data/bronze/`
+- **Station cleaning artifacts**: `./bixi-analytics/data/silver/station_cleaning/`
 - **Column names**: All translated to English (see mapping in cell 5)
 - **Ready to use**: Yes, conversion completed successfully
 
@@ -559,8 +560,8 @@ duckdb.sql("SELECT * FROM read_parquet('data/**/*.parquet') LIMIT 5").show()
 
 **Task 2b — Fuzzy matching and nearby-name analysis:**
 - Combined fuzzy methods (`ratio`, `partial_ratio`, token overlap) validated and debugged
-- Similar-name pairs at different coordinates: **2,667**
-- Distance buckets: **336 (<=0.2km), 794 (0.2–1.0km), 1,537 (>1.0km)**
+- Similar-name pairs at different coordinates: **888**
+- Distance buckets: **229 (<=0.2km), 248 (0.2–1.0km), 411 (>1.0km)**
 
 **0.05km grouping rule applied:**
 - Pairs within 0.05km: **115**
@@ -581,6 +582,24 @@ duckdb.sql("SELECT * FROM read_parquet('data/**/*.parquet') LIMIT 5").show()
 - Canonical self-loops: **1,073,149**
 - Canonical self-loops are slightly higher (+5,112), indicating consolidation captures additional same-station returns that raw naming previously fragmented.
 - Remaining unresolved name conflicts: **226 normalized names mapping to multiple canonical IDs**
+
+### Live Station Mapping Results (01_dataeng_stations2-online.ipynb)
+
+**Objective achieved:** Live BIXI station feed is mapped to cleaned canonical stations.
+
+- Live stations retrieved from GBFS: **240**
+- Mapped to canonical station IDs: **240**
+- Unmapped live stations: **0**
+- Coverage: **100.00%**
+
+**Match method breakdown:**
+- `exact_normalized_name_nearest_coord`: **227**
+- `exact_coord_key`: **12**
+- `nearest_canonical_within_0.05km`: **1**
+
+**Artifacts generated:**
+- `data/silver/station_cleaning/station_canonical_mapping.parquet`
+- `data/silver/station_cleaning/station_canonical_summary.parquet`
 
 ### Next Phase Priorities
 1. **Operationalize canonical mapping in pipeline** (PySpark, CSV input) with versioned mapping outputs
@@ -686,11 +705,11 @@ HAVING COUNT(DISTINCT (start_station_latitude, start_station_longitude)) > 1
 ```
 
 ### Remaining Implementation Work
-1. Export canonical outputs (`station_canonical_mapping`, summary, conflicts) as governed artifacts.
-2. Integrate mapping logic into production PySpark pipeline over CSV input.
-3. Create conflict-resolution rule table (approved merges/splits with effective dates).
-4. Re-aggregate downstream route/popularity/network metrics on canonical IDs.
-5. Add lineage + QA checkpoints per batch run.
+1. Integrate mapping logic into production PySpark pipeline over CSV input.
+2. Create conflict-resolution rule table (approved merges/splits with effective dates).
+3. Re-aggregate downstream route/popularity/network metrics on canonical IDs.
+4. Add lineage + QA checkpoints per batch run.
+5. Add online-feed mapping job (GBFS station_information) as a scheduled reconciliation step.
 
 ### Success Criteria
 - △ Reduced naming-fragmented loops and improved station identity consistency (validated)
@@ -701,7 +720,7 @@ HAVING COUNT(DISTINCT (start_station_latitude, start_station_longitude)) > 1
 ---
 ## �📝 Next Steps
 1. Convert notebook logic into a scheduled PySpark CSV pipeline (bronze/silver/gold).
-2. Productionize canonical station mapping as a versioned dimension table.
+2. Productionize canonical station mapping as a versioned dimension table and keep silver artifact refreshes automated.
 3. Implement conflict triage workflow for the 226 unresolved normalized names.
-4. Recompute network and route analytics using canonical station IDs.
-5. Publish QA dashboard (coverage, conflict count, station reduction, loop deltas) per run.
+4. Add daily/weekly live GBFS station mapping run and alert when coverage drops below threshold.
+5. Recompute network and route analytics using canonical station IDs and publish QA dashboard (coverage, conflict count, station reduction, loop deltas) per run.
