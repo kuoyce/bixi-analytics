@@ -37,14 +37,14 @@ def normalize_station_name(column):
 
 def main():
     spark = get_spark()
-    spark.conf.set("spark.sql.files.maxRecordsPerFile", "500000")
     spark.conf.set("spark.sql.shuffle.partitions", "200")
 
     base_path = resolve_data_path()
-    if os.environ.get("DATABRICKS_RUNTIME_VERSION"):
-        default_format = "delta"
-    else:
-        default_format = "parquet"
+    # if os.environ.get("DATABRICKS_RUNTIME_VERSION"):
+    #     default_format = "delta"
+    # else:
+    #     default_format = "parquet"
+    default_format = "parquet"
 
     storage_format = os.environ.get("SILVER_STORAGE_FORMAT", default_format)
 

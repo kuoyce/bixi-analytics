@@ -56,13 +56,14 @@ def resolve_data_path():
         
         raise FileNotFoundError("Data directory not found in current directory or project directory.")
 
-def write_table(df, path: str, fmt: str = "parquet", mode: str = "overwrite", partition_cols=None):
+def write_table(df, path: str, fmt: str = "parquet", mode: str = "overwrite", partition_cols=None, maxRecordsPerFile=None):
     writer = df.write.mode(mode)
     if partition_cols:
         writer = writer.partitionBy(*partition_cols)
-
+    if maxRecordsPerFile:
+        writer = writer.option("maxRecordsPerFile", maxRecordsPerFile)
     if fmt == "delta":
-        writer.format("delta").save(path)
+        writer.format("delta").saveAsTable(path)
     else:
         writer.parquet(path)
 

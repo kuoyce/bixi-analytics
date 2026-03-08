@@ -32,24 +32,35 @@ def normalize_station_name(column):
 
 def main():
     spark = get_spark()
-    spark.conf.set("spark.sql.files.maxRecordsPerFile", "500000")
+    # spark.conf.set("spark.sql.files.maxRecordsPerFile", "500000")
+    MAXRECORDSPERFILE = 500000
     spark.conf.set("spark.sql.shuffle.partitions", "200")
 
     base_path = resolve_data_path()
+    # if os.environ.get("DATABRICKS_RUNTIME_VERSION"):
+    #     default_format = "delta"
+    # else:
+    #     default_format = "parquet"
+
+    default_format = "parquet"
+    read_format = default_format
+    write_format = default_format
+
     if os.environ.get("DATABRICKS_RUNTIME_VERSION"):
-        default_format = "delta"
-    else:
-        default_format = "parquet"
+        write_format = "delta"
+        table_location = "workspace.`bixi-fs`"
 
-    storage_format = os.environ.get("SILVER_STORAGE_FORMAT", default_format)
-
+    # storage_format = os.environ.get("SILVER_STORAGE_FORMAT", default_format)
+    
     rides_stage_path = f"{base_path}/silver/rides_stage"
     rides_final_path = f"{base_path}/silver/rides"
+    if write_format == "delta":
+        rides_final_path = f"{table_location}.`silver-rides`"
     station_cleaning_base = f"{base_path}/silver/station_cleaning"
     mapping_csv_path = f"{station_cleaning_base}/station_direct_match_mapping_csv"
     mapping_table_path = f"{station_cleaning_base}/station_direct_match_mapping"
 
-    silver_rides_df = read_table(spark, rides_stage_path, storage_format)
+    silver_rides_df = read_table(spark, rides_stage_path, read_format)
 
     if os.path.exists(mapping_csv_path):
         mapping_df = (
@@ -61,7 +72,7 @@ def main():
         print(f"Using mapping source: {mapping_csv_path}")
     else:
         mapping_df = (
-            read_table(spark, mapping_table_path, storage_format)
+            read_table(spark, mapping_table_path, read_format)
             .select("station_key", "canonical_station_id")
             .dropDuplicates(["station_key"])
         )
@@ -105,7 +116,15 @@ def main():
     )
 
     augmented_df = augmented_df.repartition(200, col("ride_year"))
-    write_table(augmented_df, rides_final_path, storage_format, partition_cols=["ride_year"])
+    ## TEMP
+    # augmented_df = augmented_df.filter(col("ride_year") == 2026)
+
+    write_table(augmented_df, rides_final_path, write_format, partition_cols=["ride_year"], maxRecordsPerFile=MAXRECORDSPERFILE)
+    # if table_format:
+    #     write_table(augmented_df, rides_final_table, table_format, partition_cols=["ride_year"], maxRecordsPerFile=MAXRECORDSPERFILE)
+    # else:
+    #     write_table(augmented_df, rides_final_path, storage_format, partition_cols=["ride_year"], maxRecordsPerFile=MAXRECORDSPERFILE)
+
 
     total_rows = augmented_df.count()
     start_unmapped_rows = augmented_df.filter(col("start_canonical_station_id").isNull()).count()
@@ -118,7 +137,7 @@ def main():
     end_mapping_rate = (end_mapped_rows / total_rows * 100.0) if total_rows else 0.0
 
     print("=== Stage 3 complete: augment silver rides ===")
-    print(f"Storage format: {storage_format}")
+    print(f"Storage format: {write_format}")
     print(f"Rides source path: {rides_stage_path}")
     print(f"Rides final path: {rides_final_path}")
     print(f"Total rides checked: {total_rows:,}")

@@ -7,14 +7,16 @@ from sparkutils import get_spark, resolve_data_path, read_table, write_table
 
 def main():
     spark = get_spark()
-    spark.conf.set("spark.sql.files.maxRecordsPerFile", "500000")
+    # spark.conf.set("spark.sql.files.maxRecordsPerFile", "500000")
+    MAXRECORDSPERFILE = 500000
     spark.conf.set("spark.sql.shuffle.partitions", "200")
 
     base_path = resolve_data_path()
-    if os.environ.get("DATABRICKS_RUNTIME_VERSION"):
-        default_format = "delta"
-    else:
-        default_format = "parquet"
+    # if os.environ.get("DATABRICKS_RUNTIME_VERSION"):
+    #     default_format = "delta"
+    # else:
+    #     default_format = "parquet"
+    default_format = "parquet"
 
     storage_format = os.environ.get("SILVER_STORAGE_FORMAT", default_format)
 
@@ -61,7 +63,7 @@ def main():
     rides_df = rides_df.withColumn("ride_year", year(col("start_time_ms")))
 
     rides_df = rides_df.repartition(200, col("ride_year"))
-    write_table(rides_df, rides_stage_path, storage_format, partition_cols=["ride_year"])
+    write_table(rides_df, rides_stage_path, storage_format, partition_cols=["ride_year"], maxRecordsPerFile=MAXRECORDSPERFILE)
 
     total_rows = rides_df.count()
     min_start_ms = rides_df.agg({"start_time_ms": "min"}).collect()
