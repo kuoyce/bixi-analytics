@@ -34,7 +34,8 @@ def main():
     spark = get_spark()
     # spark.conf.set("spark.sql.files.maxRecordsPerFile", "500000")
     MAXRECORDSPERFILE = 500000
-    spark.conf.set("spark.sql.shuffle.partitions", "200")
+    spark.conf.set("spark.sql.shuffle.partitions", os.environ.get("SPARK_SHUFFLE_PARTITIONS", "50"))
+    spark.conf.set("spark.sql.adaptive.enabled", "true")
 
     base_path = resolve_data_path()
     # if os.environ.get("DATABRICKS_RUNTIME_VERSION"):
@@ -57,26 +58,30 @@ def main():
     if write_format == "delta":
         rides_final_path = f"{table_location}.`silver-rides`"
     station_cleaning_base = f"{base_path}/silver/station_cleaning"
+    # Use station mapping produced by stage 2b script (unsuffixed output paths)
     mapping_csv_path = f"{station_cleaning_base}/station_direct_match_mapping_csv"
     mapping_table_path = f"{station_cleaning_base}/station_direct_match_mapping"
 
     silver_rides_df = read_table(spark, rides_stage_path, read_format)
 
-    if os.path.exists(mapping_csv_path):
+    # Prefer parquet table over CSV for better performance
+    if os.path.exists(mapping_table_path):
+        mapping_df = (
+            read_table(spark, mapping_table_path, read_format)
+            .select("station_key", "canonical_station_id", "canonical_lat", "canonical_lon", "normalized_name")
+            .dropDuplicates(["station_key"])
+        )
+        print(f"Using mapping source (parquet): {mapping_table_path}")
+    elif os.path.exists(mapping_csv_path):
         mapping_df = (
             spark.read.option("header", True)
             .csv(mapping_csv_path)
             .select("station_key", "canonical_station_id")
             .dropDuplicates(["station_key"])
         )
-        print(f"Using mapping source: {mapping_csv_path}")
+        print(f"Using mapping source (CSV fallback): {mapping_csv_path}")
     else:
-        mapping_df = (
-            read_table(spark, mapping_table_path, read_format)
-            .select("station_key", "canonical_station_id")
-            .dropDuplicates(["station_key"])
-        )
-        print(f"Using mapping source: {mapping_table_path}")
+        raise FileNotFoundError(f"Mapping not found at {mapping_table_path} or {mapping_csv_path}")
 
     keyed_rides_df = (
         silver_rides_df
@@ -136,9 +141,10 @@ def main():
     start_mapping_rate = (start_mapped_rows / total_rows * 100.0) if total_rows else 0.0
     end_mapping_rate = (end_mapped_rows / total_rows * 100.0) if total_rows else 0.0
 
-    print("=== Stage 3 complete: augment silver rides ===")
+    print("=== Stage 3 complete: augment silver rides with station mapping ===")
     print(f"Storage format: {write_format}")
     print(f"Rides source path: {rides_stage_path}")
+    print(f"Mapping source: {mapping_table_path} or {mapping_csv_path}")
     print(f"Rides final path: {rides_final_path}")
     print(f"Total rides checked: {total_rows:,}")
     print(f"Start mapping rate: {start_mapped_rows:,}/{total_rows:,} ({start_mapping_rate:.4f}%)")
