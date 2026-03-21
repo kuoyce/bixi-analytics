@@ -111,6 +111,72 @@ def apply_manual_station_overrides(station_points_df, manual_overrides):
     return points_df.drop("original_normalized_name"), applied_rows
 
 
+def normalize_station_name_py(text):
+    if text is None:
+        return ""
+    text = str(text).strip().lower()
+    text = re.sub(r"\s+", " ", text)
+    text = re.sub(r"\s*/\s*", " / ", text)
+    text = re.sub(r"\s*-\s*", "-", text)
+    return text.strip()
+
+
+def parse_manual_station_overrides(raw_json):
+    if not raw_json:
+        return []
+
+    parsed = json.loads(raw_json)
+    if isinstance(parsed, dict):
+        parsed = [parsed]
+    if not isinstance(parsed, list):
+        raise ValueError("MANUAL_STATION_OVERRIDES_JSON must be a JSON object or array")
+
+    result = []
+    for idx, item in enumerate(parsed):
+        if not isinstance(item, dict):
+            raise ValueError(f"Override at index {idx} must be a JSON object")
+
+        from_name = item.get("from_normalized_name")
+        to_name = item.get("to_normalized_name")
+        if not from_name or not to_name:
+            raise ValueError(
+                "Each override must include from_normalized_name and to_normalized_name"
+            )
+
+        result.append(
+            {
+                "from_coord_key": item.get("from_coord_key"),
+                "from_normalized_name": normalize_station_name_py(from_name),
+                "to_normalized_name": normalize_station_name_py(to_name),
+                "reason": item.get("reason", "manual_override"),
+            }
+        )
+
+    return result
+
+
+def apply_manual_station_overrides(station_points_df, manual_overrides):
+    if not manual_overrides:
+        return station_points_df, 0
+
+    points_df = station_points_df.withColumn("_orig_name", F.col("normalized_name"))
+    updated_name_col = F.col("normalized_name")
+
+    for override in manual_overrides:
+        cond = F.col("normalized_name") == F.lit(override["from_normalized_name"])
+        from_coord_key = override.get("from_coord_key")
+        if from_coord_key:
+            cond = cond & (F.col("coord_key") == F.lit(from_coord_key))
+
+        updated_name_col = F.when(cond, F.lit(override["to_normalized_name"]))\
+            .otherwise(updated_name_col)
+
+    points_df = points_df.withColumn("normalized_name", updated_name_col)
+    applied_rows = points_df.filter(F.col("normalized_name") != F.col("_orig_name")).count()
+
+    return points_df.drop("_orig_name"), applied_rows
+
+
 def haversine_km_expr(lat1, lon1, lat2, lon2):
     r = F.lit(6371.0)
     dlat = F.radians(lat2 - lat1)
@@ -217,6 +283,12 @@ def main():
             "Warning: could not set spark.shuffle.sort.bypassMergeThreshold at runtime "
             f"({exc}). Continuing with Spark default."
         )
+    try:
+        spark.conf.set("spark.shuffle.sort.bypassMergeThreshold", "200")
+        bypass_merge_set = True
+    except Exception:
+        # Spark 4 may reject runtime changes for this config.
+        bypass_merge_set = False
 
     base_path = resolve_data_path()
     default_format = "parquet"
@@ -228,25 +300,30 @@ def main():
     max_edge_collect = int(os.environ.get("MAX_EDGE_COLLECT", "500000"))
     enable_manual_station_overrides = os.environ.get("ENABLE_MANUAL_STATION_OVERRIDES", "1") == "1"
 
-    # Optional custom overrides (JSON object or array) from env var.
-    manual_overrides_from_env = parse_manual_station_overrides(
+    overrides_from_env = parse_manual_station_overrides(
         os.environ.get("MANUAL_STATION_OVERRIDES_JSON", "")
     )
 
-    # Default known rename near Metro Mont-Royal (coord-specific to avoid broad merges).
+    # Built-in known rename/suffix cases; coord-scoped to avoid over-merge.
     default_manual_overrides = [
         {
             "from_coord_key": "45.524420,-73.581663",
             "from_normalized_name": normalize_station_name_py("métro mont-royal (place gérald-godin)"),
             "to_normalized_name": normalize_station_name_py("métro mont-royal (utilités publiques / rivard)"),
             "reason": "known_station_rename_metro_mont_royal",
-        }
+        },
+        {
+            "from_coord_key": "45.532077,-73.575143",
+            "from_normalized_name": normalize_station_name_py("marquette / du mont-royal (sud)"),
+            "to_normalized_name": normalize_station_name_py("marquette / du mont-royal"),
+            "reason": "known_station_suffix_variant_marquette_mont_royal",
+        },
     ]
 
     manual_station_overrides = []
     if enable_manual_station_overrides:
         manual_station_overrides.extend(default_manual_overrides)
-        manual_station_overrides.extend(manual_overrides_from_env)
+        manual_station_overrides.extend(overrides_from_env)
 
     rides_stage_path = f"{base_path}/silver/rides_stage"
     station_cleaning_base = f"{base_path}/silver/station_cleaning"
@@ -300,7 +377,6 @@ def main():
     )
 
     station_points_df = start_points_df.unionByName(end_points_df)
-
     station_points_df, manual_override_applied_rows = apply_manual_station_overrides(
         station_points_df=station_points_df,
         manual_overrides=manual_station_overrides,
@@ -468,9 +544,10 @@ def main():
     print("=== Stage 2 complete: notebook-inspired station direct mapping ===")
     print(f"Storage format: {storage_format}")
     print(f"Rides source path: {rides_stage_path}")
+    print(f"Bypass merge threshold set at runtime: {bypass_merge_set}")
     print(f"Proximity merge enabled: {enable_proximity_merge}")
     print(f"Manual station overrides enabled: {enable_manual_station_overrides}")
-    print(f"Manual station override rules applied: {len(manual_station_overrides)}")
+    print(f"Manual station override rules loaded: {len(manual_station_overrides)}")
     print(f"Rows affected by manual overrides: {manual_override_applied_rows:,}")
     print(f"Proximity threshold (km): {proximity_km}")
     print(f"Proximity edge count: {edge_count:,}")
@@ -486,30 +563,30 @@ def main():
     if save_intermediate:
         print(f"Intermediate base path: {intermediate_base}")
 
-    # Validation for known split station pair at Metro Mont-Royal.
-    validation_source_coord = os.environ.get("VALIDATION_SOURCE_COORD_KEY", "45.524420,-73.581663")
-    validation_target_coord = os.environ.get("VALIDATION_TARGET_COORD_KEY", "45.524353,-73.581432")
+    validation_cases = [
+        ("metro_mont_royal", "45.524420,-73.581663", "45.524353,-73.581432"),
+        ("marquette_mont_royal", "45.532077,-73.575143", "45.532218,-73.575431"),
+    ]
 
-    validation_df = (
-        direct_match_mapping_df
-        .filter(F.col("coord_key").isin([validation_source_coord, validation_target_coord]))
-        .select("coord_key", "normalized_name", "canonical_station_id", "cluster_id", "observed_trip_count")
-    )
+    print("Validation checks for known manual-merge cases:")
+    for case_name, src_coord, dst_coord in validation_cases:
+        case_df = (
+            direct_match_mapping_df
+            .filter(F.col("coord_key").isin([src_coord, dst_coord]))
+            .select("coord_key", "normalized_name", "canonical_station_id", "cluster_id", "observed_trip_count")
+        )
 
-    validation_rows = validation_df.collect()
-    if not validation_rows:
-        print("Validation check: no rows found for validation coordinates")
-    else:
-        canonical_ids = sorted({row["canonical_station_id"] for row in validation_rows if row["canonical_station_id"]})
-        coord_count = len({row["coord_key"] for row in validation_rows})
+        rows = case_df.collect()
+        if not rows:
+            print(f"- {case_name}: no rows found for coords {src_coord}, {dst_coord}")
+            continue
+
+        coord_count = len({r["coord_key"] for r in rows})
+        canonical_ids = sorted({r["canonical_station_id"] for r in rows if r["canonical_station_id"]})
         merged_ok = len(canonical_ids) == 1 and coord_count >= 2
 
-        print("Validation check: Metro Mont-Royal merge")
-        print(f"Validation source coord: {validation_source_coord}")
-        print(f"Validation target coord: {validation_target_coord}")
-        print(f"Validation canonical IDs: {canonical_ids}")
-        print(f"Validation merged success: {merged_ok}")
-        validation_df.orderBy("coord_key", "normalized_name").show(truncate=False)
+        print(f"- {case_name}: coords={coord_count}, canonical_ids={canonical_ids}, merged={merged_ok}")
+        case_df.orderBy("coord_key", "normalized_name").show(truncate=False)
 
     spark.stop()
 
