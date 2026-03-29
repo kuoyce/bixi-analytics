@@ -307,16 +307,20 @@ def main():
     # Built-in known rename/suffix cases; coord-scoped to avoid over-merge.
     default_manual_overrides = [
         {
-            "from_coord_key": "45.524420,-73.581663",
-            "from_normalized_name": normalize_station_name_py("métro mont-royal (place gérald-godin)"),
-            "to_normalized_name": normalize_station_name_py("métro mont-royal (utilités publiques / rivard)"),
-            "reason": "known_station_rename_metro_mont_royal",
-        },
-        {
             "from_coord_key": "45.532077,-73.575143",
             "from_normalized_name": normalize_station_name_py("marquette / du mont-royal (sud)"),
             "to_normalized_name": normalize_station_name_py("marquette / du mont-royal"),
             "reason": "known_station_suffix_variant_marquette_mont_royal",
+        },
+        {
+            "from_normalized_name": normalize_station_name_py("rivard / du mont-royal"),
+            "to_normalized_name": normalize_station_name_py("rivard / mont-royal"),
+            "reason": "known_station_variant_rivard_mont_royal",
+        },
+        {
+            "from_normalized_name": normalize_station_name_py("métro laurier (berri / laurier)"),
+            "to_normalized_name": normalize_station_name_py("berri / laurier"),
+            "reason": "known_station_variant_metro_laurier_berri_laurier",
         },
     ]
 
