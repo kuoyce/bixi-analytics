@@ -3,13 +3,13 @@ import os
 from pyspark.sql.types import StructType, StructField, StringType, DoubleType
 from pyspark.sql.functions import col, to_timestamp, from_unixtime, year
 
-from sparkutils import get_spark, resolve_data_path, read_table, write_table
+from sparkutils import get_spark, resolve_data_path, read_table, write_table, apply_local_spark_defaults
 
 def main():
     spark = get_spark()
+    apply_local_spark_defaults(spark)
     # spark.conf.set("spark.sql.files.maxRecordsPerFile", "500000")
-    MAXRECORDSPERFILE = 500000
-    spark.conf.set("spark.sql.shuffle.partitions", "200")
+    MAXRECORDSPERFILE = int(os.environ.get("STAGE1_MAX_RECORDS_PER_FILE", "100000"))
 
     base_path = resolve_data_path()
     # if os.environ.get("DATABRICKS_RUNTIME_VERSION"):
@@ -62,7 +62,9 @@ def main():
     rides_df = rides_df.withColumn("end_time_ms", to_timestamp(from_unixtime(col("end_time_ms") / 1000)))
     rides_df = rides_df.withColumn("ride_year", year(col("start_time_ms")))
 
-    rides_df = rides_df.repartition(200, col("ride_year"))
+    target_repartition = int(os.environ.get("STAGE1_REPARTITION_PARTITIONS", "0"))
+    if target_repartition > 0:
+        rides_df = rides_df.repartition(target_repartition, col("ride_year"))
     write_table(rides_df, rides_stage_path, storage_format, partition_cols=["ride_year"], maxRecordsPerFile=MAXRECORDSPERFILE)
 
     total_rows = rides_df.count()
@@ -71,6 +73,10 @@ def main():
 
     print("=== Stage 1 complete: bronze -> silver rides_stage ===")
     print(f"Storage format: {storage_format}")
+    print(f"spark.sql.shuffle.partitions: {spark.conf.get('spark.sql.shuffle.partitions')}")
+    print(f"spark.sql.files.maxPartitionBytes: {spark.conf.get('spark.sql.files.maxPartitionBytes')}")
+    print(f"spark.sql.parquet.enableVectorizedReader: {spark.conf.get('spark.sql.parquet.enableVectorizedReader')}")
+    print(f"Max records per file: {MAXRECORDSPERFILE}")
     print(f"Rides stage path: {rides_stage_path}")
     print(f"Total rides written: {total_rows:,}")
     print(min_start_ms)

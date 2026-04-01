@@ -7,14 +7,33 @@ def get_spark():
         spark = SparkSession.builder.appName("Bixi Analytics").getOrCreate()
     else:
         from delta import configure_spark_with_delta_pip
+        local_driver_memory = os.environ.get("SPARK_DRIVER_MEMORY", "12g")
         spark = configure_spark_with_delta_pip(
             SparkSession.builder \
                 .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension") \
                 .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog") \
+                .config("spark.driver.memory", local_driver_memory) \
                 .appName("Bixi Analytics").master("local[*]")
         ).getOrCreate()
 
     return spark
+
+
+def apply_local_spark_defaults(spark):
+    """
+    Apply consistent, memory-safer Spark SQL defaults for local runs.
+    Databricks runtime keeps cluster-level settings, so skip there.
+    """
+    if os.environ.get("DATABRICKS_RUNTIME_VERSION"):
+        return
+
+    spark.conf.set("spark.sql.shuffle.partitions", os.environ.get("SPARK_SHUFFLE_PARTITIONS", "24"))
+    spark.conf.set("spark.sql.adaptive.enabled", os.environ.get("SPARK_SQL_ADAPTIVE_ENABLED", "true"))
+    spark.conf.set("spark.sql.files.maxPartitionBytes", os.environ.get("SPARK_MAX_PARTITION_BYTES", "33554432"))
+    spark.conf.set(
+        "spark.sql.parquet.enableVectorizedReader",
+        os.environ.get("SPARK_ENABLE_VECTORIZED_READER", "false"),
+    )
 
 def resolve_project_root():
     """

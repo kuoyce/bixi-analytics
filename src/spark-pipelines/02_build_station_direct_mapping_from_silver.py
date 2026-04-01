@@ -6,7 +6,7 @@ from collections import defaultdict
 from pyspark.sql import Window
 from pyspark.sql import functions as F
 
-from sparkutils import get_spark, resolve_data_path, read_table, write_table
+from sparkutils import get_spark, resolve_data_path, read_table, write_table, apply_local_spark_defaults
 
 
 """
@@ -271,10 +271,11 @@ def build_coord_cluster_mapping(coord_totals_df, proximity_edges_df, max_edge_co
 
 def main():
     spark = get_spark()
+    apply_local_spark_defaults(spark)
     
     # Tuning for local mode: reduce shuffle partitions for small data, suppress expected warnings
-    spark.conf.set("spark.sql.shuffle.partitions", os.environ.get("SPARK_SHUFFLE_PARTITIONS", "50"))
-    spark.conf.set("spark.sql.adaptive.enabled", "true")
+    spark.conf.set("spark.sql.shuffle.partitions", os.environ.get("SPARK_SHUFFLE_PARTITIONS", spark.conf.get("spark.sql.shuffle.partitions")))
+    spark.conf.set("spark.sql.adaptive.enabled", os.environ.get("SPARK_SQL_ADAPTIVE_ENABLED", spark.conf.get("spark.sql.adaptive.enabled")))
     # Spark 4 may block runtime updates to some shuffle configs; keep this best-effort.
     try:
         spark.conf.set("spark.shuffle.sort.bypassMergeThreshold", "200")

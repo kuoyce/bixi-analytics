@@ -4,7 +4,7 @@ import h3
 from pyspark.sql import functions as F
 from pyspark.sql.types import StringType
 
-from sparkutils import get_spark, resolve_data_path, read_table, write_table
+from sparkutils import get_spark, resolve_data_path, read_table, write_table, apply_local_spark_defaults
 
 
 def _safe_int_resolution(raw_value: str, default: int = 9) -> int:
@@ -17,9 +17,7 @@ def _safe_int_resolution(raw_value: str, default: int = 9) -> int:
 
 def main():
     spark = get_spark()
-
-    spark.conf.set("spark.sql.shuffle.partitions", os.environ.get("SPARK_SHUFFLE_PARTITIONS", "50"))
-    spark.conf.set("spark.sql.adaptive.enabled", "true")
+    apply_local_spark_defaults(spark)
 
     base_path = resolve_data_path()
     storage_format = os.environ.get("SILVER_STORAGE_FORMAT", "parquet")
