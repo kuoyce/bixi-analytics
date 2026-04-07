@@ -85,7 +85,7 @@ duckdb.sql("""
 
 #### ⚠️ **CRITICAL FINDING: Station Name Inconsistencies (Year-Based)**
 
-**Discovery**: Analysis of 27.5M trips revealed **20 major locations with multiple station names** at identical GPS coordinates. The root cause is **progressive data standardization across years (2024-2026)**.
+**Discovery (updated from workbook)**: Station cleaning analysis found **179 coordinate locations with multiple station names** at identical GPS coordinates, affecting **3,281,706 trips**. The root cause remains **progressive data standardization across years (2024-2026)** plus naming convention drift.
 
 **Examples**:
 - **Location (45.520626, -73.575951)**:
@@ -387,12 +387,39 @@ duckdb.sql("SELECT * FROM read_parquet('data/**/*.parquet') LIMIT 5").show()
 3. Station network analysis (routes, connectivity)
 4. Duration statistics
 
-### Phase 3: Python Computation (10-15 min)
+### Phase 3: Historical Station Rider Patterns (15-20 min)
+**Main goal**: Identify station-level historical demand patterns, velocity (in+out), and dead-zone periods.
+
+1. **Top most frequently used stations**
+    - Rank stations by total activity: `starts + ends`
+    - Produce daily/weekly/monthly top-N leaderboards
+    - Compare station rank stability over time (persistent hubs vs seasonal spikes)
+
+2. **Highest velocity stations (in + out flow)**
+    - Compute hourly `in_count`, `out_count`, and `velocity = in_count + out_count`
+    - Surface peak-velocity windows by station and by district
+    - Flag highly imbalanced stations (`abs(in_count - out_count)` high) for rebalancing signals
+
+3. **Dead zones / dead periods detection**
+    - Define dead period candidates as sudden drops to near-zero movement during normally active windows
+    - Detect two scenarios:
+      - probable full station: high inbound pressure then no arrivals/departures
+      - probable empty station: high outbound demand historically then no departures
+    - Quantify dead-zone risk score per station-hour (frequency and duration of events)
+
+4. **Suggested exploratory items**
+    - Station seasonality profile (month-over-month activity heatmap)
+    - Weekday vs weekend behavior by station cluster
+    - Rolling trend shifts (7-day / 30-day moving averages)
+    - Weather/event sensitivity overlay (if external data is added)
+    - Early warning candidates: stations with repeated high-velocity + dead-period combinations
+
+### Phase 4: Python Computation (10-15 min)
 1. Haversine distance calculations
 2. Outlier detection
 3. Correlation analysis
 
-### Phase 4: Visualization (10 min)
+### Phase 5: Visualization (10 min)
 - Bring results to pandas/matplotlib/plotly
 - Create heatmaps, histograms, scatter plots
 
@@ -411,7 +438,8 @@ duckdb.sql("SELECT * FROM read_parquet('data/**/*.parquet') LIMIT 5").show()
 ---
 
 ## 💾 Data Location
-- **Parquet files**: `./bixi-analytics/data/`
+- **Bronze Parquet files**: `./bixi-analytics/data/bronze/`
+- **Station cleaning artifacts**: `./bixi-analytics/data/silver/station_cleaning/`
 - **Column names**: All translated to English (see mapping in cell 5)
 - **Ready to use**: Yes, conversion completed successfully
 
@@ -488,7 +516,7 @@ duckdb.sql("SELECT * FROM read_parquet('data/**/*.parquet') LIMIT 5").show()
 - **Short anomalies** (<2 min, 3.0%): Mostly same-station rapid returns (55.6%), likely user errors or bike tests; different-station variants show mixed validity
 - **Long anomalies** (>12 hours, 0.06%): Bimodal pattern - same-station returns (6%) indicate abandoned bikes; different-station majority (94%) suggest legitimate extended journeys or lost bikes in transit to recovery
 
-**4. Recommendations for Phase 3**
+**4. Recommendations for Phase 4**
 - Use `(start_station_latitude, start_station_longitude)` as canonical station ID instead of station names
 - Create exclusion filter for "cyclo" station in network/route analyses
 - Create dimension table: `station_id → all_name_variants` with year-based tracking
@@ -518,22 +546,84 @@ duckdb.sql("SELECT * FROM read_parquet('data/**/*.parquet') LIMIT 5").show()
 - Time data precision (milliseconds) supports second-level analysis
 - District assignments are consistent and useful for geographic segmentation
 
+### Station Cleaning Workbook Results (01_dataeng_stations.ipynb)
+
+**Task 1 — Identical-coordinate name variants:**
+- Multi-name coordinate locations: **179**
+- Trips affected: **3,281,706**
+
+**Task 2 — Name normalization impact:**
+- Raw multi-name locations: **179**
+- Post-normalization multi-name locations: **141**
+- Fully resolved by normalization: **38**
+- Total variants reduced: **371 → 329**
+
+**Task 2b — Fuzzy matching and nearby-name analysis:**
+- Combined fuzzy methods (`ratio`, `partial_ratio`, token overlap) validated and debugged
+- Similar-name pairs at different coordinates: **888**
+- Distance buckets: **229 (<=0.2km), 248 (0.2–1.0km), 411 (>1.0km)**
+
+**0.05km grouping rule applied:**
+- Pairs within 0.05km: **115**
+- Grouped normalized names: **192**
+- Station groups: **87**
+
+**Task 3 — Canonical mapping table built:**
+- Raw observed station variants (name+coord): **1,922**
+- Unique coordinates before canonicalization: **1,730**
+- Canonical stations after mapping: **1,577**
+- Mapping rows assigned: **1,922**
+
+**Task 4 — Validation completed:**
+- Coordinate reduction: **153** (**8.84%**)
+- Coordinate-to-multiple-canonical-ID conflicts: **0**
+- Unmapped trips: **148 / 27,462,260** (**0.0005%**)
+- Raw-name self-loops: **1,068,037**
+- Canonical self-loops: **1,073,149**
+- Canonical self-loops are slightly higher (+5,112), indicating consolidation captures additional same-station returns that raw naming previously fragmented.
+- Remaining unresolved name conflicts: **226 normalized names mapping to multiple canonical IDs**
+
+### Live Station Mapping Results (01_dataeng_stations2-online.ipynb)
+
+**Objective achieved:** Live BIXI station feed is mapped to cleaned canonical stations.
+
+- Live stations retrieved from GBFS: **240**
+- Mapped to canonical station IDs: **240**
+- Unmapped live stations: **0**
+- Coverage: **100.00%**
+
+**Match method breakdown:**
+- `exact_normalized_name_nearest_coord`: **227**
+- `exact_coord_key`: **12**
+- `nearest_canonical_within_0.05km`: **1**
+
+**Artifacts generated:**
+- `data/silver/station_cleaning/station_canonical_mapping.parquet`
+- `data/silver/station_cleaning/station_canonical_summary.parquet`
+
 ### Next Phase Priorities
-1. **Consolidate stations** by coordinates before network analysis (reduce ~120 variants to ~100 canonical locations)
-2. **Apply validity filters** based on trip duration and direction patterns (exclude obviously anomalous data from metrics)
-3. **Implement "cyclo" special handling** (exclude from standard metrics, track separately for loss/recovery analysis)
-4. **Calculate distances** for all trips to enable distance-duration correlation analysis
-5. **Develop trip classification model** (normal commute vs test vs lost/stolen) using multi-feature approach
+1. **Operationalize canonical mapping in pipeline** (PySpark, CSV input) with versioned mapping outputs
+2. **Resolve remaining 226 multi-canonical normalized-name conflicts** using rule tables and manual curation loop
+3. **Apply validity filters** based on trip duration and direction patterns (exclude/flag anomalous records)
+4. **Implement "cyclo" special handling** (exclude from standard metrics, track separately for loss/recovery analysis)
+5. **Re-run route/network KPIs with canonical IDs** and compare to pre-cleaning baselines
 
 ---
 
-## 🔧 Station Name Standardization TODO
+## 🔧 Station Name Standardization Status
 
 ### Problem Statement
 Multiple station names exist for identical GPS coordinates (20+ locations identified), causing:
 - Fragmented route analysis (self-loops in network)
 - Inflated station count metrics
 - Year-based naming inconsistencies (2024 vs 2025 vs 2026 data quality)
+
+### Completion Status (Workbook)
+- ✅ Step 1 completed: Identical-coordinate variants identified and quantified.
+- ✅ Step 2 completed: Similar-name nearby-coordinate matching implemented with fuzzy + proximity logic.
+- ✅ Step 3 completed: Same-name multi-coordinate conflicts surfaced through Task 4 conflict analysis.
+- ✅ Canonical mapping table produced: `station_canonical_mapping_df` and `station_canonical_summary_df`.
+- ✅ Validation completed: consolidation, coverage, self-loop comparison, and conflict reporting.
 
 ### Standardization Algorithm
 
@@ -614,22 +704,23 @@ HAVING COUNT(DISTINCT (start_station_latitude, start_station_longitude)) > 1
 }
 ```
 
-### Phase 3: Apply Standardization
-1. Create `station_canonical_mapping.csv` from algorithm above
-2. Re-aggregate all analyses using canonical station IDs
-3. Update network analysis with consolidated routes
-4. Re-calculate popularity metrics
-5. Document data lineage: original_name → canonical_name
+### Remaining Implementation Work
+1. Integrate mapping logic into production PySpark pipeline over CSV input.
+2. Create conflict-resolution rule table (approved merges/splits with effective dates).
+3. Re-aggregate downstream route/popularity/network metrics on canonical IDs.
+4. Add lineage + QA checkpoints per batch run.
+5. Add online-feed mapping job (GBFS station_information) as a scheduled reconciliation step.
 
 ### Success Criteria
-- ✓ No routes with identical start/end station pairs (after standardization)
-- ✓ Station count reduces to ~90-100 unique locations (vs 120+ variants)
-- ✓ All geographic analyses use consistent station identity
-- ✓ Temporal analysis can track naming changes by year
+- △ Reduced naming-fragmented loops and improved station identity consistency (validated)
+- ✓ Coordinate-to-canonical mapping is deterministic and conflict-free at coordinate level
+- ✓ Coverage is near-complete (unmapped trip rate ~0.0005%)
+- ✓ Standardization outputs are ready for pipeline operationalization
 
 ---
 ## �📝 Next Steps
-1. Create DuckDB analysis notebook
-2. Run temporal + geographic analyses (largest gains)
-3. Compute distance metrics
-4. Visualize key findings
+1. Convert notebook logic into a scheduled PySpark CSV pipeline (bronze/silver/gold).
+2. Productionize canonical station mapping as a versioned dimension table and keep silver artifact refreshes automated.
+3. Implement conflict triage workflow for the 226 unresolved normalized names.
+4. Add daily/weekly live GBFS station mapping run and alert when coverage drops below threshold.
+5. Recompute network and route analytics using canonical station IDs and publish QA dashboard (coverage, conflict count, station reduction, loop deltas) per run.
