@@ -264,10 +264,16 @@ def main():
             .drop("__rn", "__source_rank")
         )
 
-        writer = updated_touched.write.mode("overwrite").partitionBy("canonical_station_id")
         if has_existing_output:
-            writer = writer.option("partitionOverwriteMode", "dynamic")
-        writer.parquet(output_path)
+            min_ts = updated_touched.select(F.min("ts_hour")).collect()[0][0]
+            max_ts = updated_touched.select(F.max("ts_hour")).collect()[0][0]
+            if min_ts and max_ts:
+                replace_where_clause = f"ts_hour >= '{min_ts}' AND ts_hour <= '{max_ts}'"
+                updated_touched.write.mode("overwrite").option("replaceWhere", replace_where_clause).partitionBy("canonical_station_id").parquet(output_path)
+            else:
+                updated_touched.write.mode("overwrite").partitionBy("canonical_station_id").parquet(output_path)
+        else:
+            updated_touched.write.mode("overwrite").partitionBy("canonical_station_id").parquet(output_path)
     else:
         touched_station_ids = []
 
