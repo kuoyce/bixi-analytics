@@ -75,12 +75,11 @@ def main():
     print(f"Storage format: {storage_format}")
     print(f"spark.sql.shuffle.partitions: {spark.conf.get('spark.sql.shuffle.partitions')}")
     print(f"spark.sql.files.maxPartitionBytes: {spark.conf.get('spark.sql.files.maxPartitionBytes')}")
-    print(f"spark.sql.parquet.enableVectorizedReader: {spark.conf.get('spark.sql.parquet.enableVectorizedReader')}")
     print(f"Max records per file: {MAXRECORDSPERFILE}")
     print(f"Rides stage path: {rides_stage_path}")
     print(f"Total rides written: {total_rows:,}")
-    print(min_start_ms)
-    print(max_end_ms)
+    print(f"Min start time: {min_start_ms[0]['min(start_time_ms)']}")
+    print(f"Max end time: {max_end_ms[0]['max(end_time_ms)']}")
 
     spark.stop()
 
