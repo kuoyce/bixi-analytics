@@ -40,6 +40,9 @@ def empty_weather_df(spark: SparkSession):
 
 
 def load_existing_station_max_ts(spark: SparkSession, output_path: str, station_ids: list[str]) -> dict[str, datetime]:
+    if not os.path.exists(output_path):
+        return {}
+
     try:
         existing_idx = (
             spark.read.parquet(output_path)
@@ -241,16 +244,14 @@ def main():
             for r in fetched_sdf.select("canonical_station_id").distinct().collect()
         ]
 
-        try:
+        if os.path.exists(output_path):
             existing_touched = (
                 spark.read.parquet(output_path)
                 .where(F.col("canonical_station_id").isin(touched_station_ids))
                 .select("canonical_station_id", "ts_hour", "temp", "precip")
             )
-            has_existing_output = True
-        except Exception:
+        else:
             existing_touched = empty_weather_df(spark)
-            has_existing_output = False
 
         merged = existing_touched.withColumn("__source_rank", F.lit(1)).unionByName(
             fetched_sdf.withColumn("__source_rank", F.lit(2)),
@@ -264,30 +265,37 @@ def main():
             .drop("__rn", "__source_rank")
         )
 
-        if has_existing_output:
-            min_ts = updated_touched.select(F.min("ts_hour")).collect()[0][0]
-            max_ts = updated_touched.select(F.max("ts_hour")).collect()[0][0]
-            if min_ts and max_ts:
-                replace_where_clause = f"ts_hour >= '{min_ts}' AND ts_hour <= '{max_ts}'"
-                updated_touched.write.mode("overwrite").option("replaceWhere", replace_where_clause).partitionBy("canonical_station_id").parquet(output_path)
-            else:
-                updated_touched.write.mode("overwrite").partitionBy("canonical_station_id").parquet(output_path)
-        else:
-            updated_touched.write.mode("overwrite").partitionBy("canonical_station_id").parquet(output_path)
+        # Explicitly cast write columns so parquet write schema is stable.
+        write_df = updated_touched.select(
+            F.col("canonical_station_id").cast("string").alias("canonical_station_id"),
+            F.col("ts_hour").cast("timestamp").alias("ts_hour"),
+            F.col("temp").cast("double").alias("temp"),
+            F.col("precip").cast("double").alias("precip"),
+        )
+
+        writer = write_df.write.mode("overwrite").partitionBy("canonical_station_id")
+        if os.path.exists(output_path):
+            writer = writer.option("partitionOverwriteMode", "dynamic")
+        writer.parquet(output_path)
     else:
         touched_station_ids = []
 
-    try:
-        final_sdf = spark.read.parquet(output_path)
-        metrics = final_sdf.agg(
-            F.count("*").alias("row_count"),
-            F.min("ts_hour").alias("data_start"),
-            F.max("ts_hour").alias("data_end"),
-        ).collect()[0]
-        row_count = int(metrics["row_count"])
-        data_start = metrics["data_start"].isoformat() if metrics["data_start"] else None
-        data_end = metrics["data_end"].isoformat() if metrics["data_end"] else None
-    except Exception:
+    if os.path.exists(output_path):
+        try:
+            final_sdf = spark.read.parquet(output_path)
+            metrics = final_sdf.agg(
+                F.count("*").alias("row_count"),
+                F.min("ts_hour").alias("data_start"),
+                F.max("ts_hour").alias("data_end"),
+            ).collect()[0]
+            row_count = int(metrics["row_count"])
+            data_start = metrics["data_start"].isoformat() if metrics["data_start"] else None
+            data_end = metrics["data_end"].isoformat() if metrics["data_end"] else None
+        except Exception:
+            row_count = 0
+            data_start = None
+            data_end = None
+    else:
         row_count = 0
         data_start = None
         data_end = None
