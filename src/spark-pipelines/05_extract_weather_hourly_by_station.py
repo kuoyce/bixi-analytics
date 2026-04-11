@@ -9,7 +9,12 @@ from pyspark.sql import SparkSession, Window
 from pyspark.sql import functions as F
 from pyspark.sql import types as T
 
-from sparkutils import apply_local_spark_defaults, get_spark, resolve_data_path
+from sparkutils import (
+    apply_local_spark_defaults,
+    get_spark,
+    resolve_data_path,
+    set_log_level_safe,
+)
 
 
 def parse_station_ids(raw_value: str | None) -> list[str]:
@@ -100,7 +105,7 @@ def fetch_station_weather_rows(
 def main():
     spark = get_spark()
     apply_local_spark_defaults(spark)
-    spark.sparkContext.setLogLevel("WARN")
+    set_log_level_safe(spark, "WARN")
 
     url = "https://archive-api.open-meteo.com/v1/archive"
     timezone_name = os.environ.get("WEATHER_TIMEZONE", "America/Montreal")
