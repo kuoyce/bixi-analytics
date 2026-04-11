@@ -262,9 +262,9 @@ def main():
             .drop("__rn", "__source_rank")
         )
 
-        spark.conf.set("spark.sql.sources.partitionOverwriteMode", "dynamic")
         (
             updated_touched.write.mode("overwrite")
+            .option("partitionOverwriteMode", "dynamic")
             .partitionBy("canonical_station_id")
             .parquet(output_path)
         )
