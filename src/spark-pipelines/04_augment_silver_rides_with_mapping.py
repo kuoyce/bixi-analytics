@@ -195,7 +195,6 @@ def main():
     print(f"Storage format: {write_format}")
     print(f"spark.sql.shuffle.partitions: {spark.conf.get('spark.sql.shuffle.partitions')}")
     print(f"spark.sql.files.maxPartitionBytes: {spark.conf.get('spark.sql.files.maxPartitionBytes')}")
-    print(f"spark.sql.parquet.enableVectorizedReader: {spark.conf.get('spark.sql.parquet.enableVectorizedReader')}")
     print(f"Max records per file: {MAXRECORDSPERFILE}")
     print(f"Write strategy: {write_strategy}")
     print(f"Years written: {years_written}")
