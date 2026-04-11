@@ -247,8 +247,10 @@ def main():
                 .where(F.col("canonical_station_id").isin(touched_station_ids))
                 .select("canonical_station_id", "ts_hour", "temp", "precip")
             )
+            has_existing_output = True
         except Exception:
             existing_touched = empty_weather_df(spark)
+            has_existing_output = False
 
         merged = existing_touched.withColumn("__source_rank", F.lit(1)).unionByName(
             fetched_sdf.withColumn("__source_rank", F.lit(2)),
@@ -262,12 +264,10 @@ def main():
             .drop("__rn", "__source_rank")
         )
 
-        (
-            updated_touched.write.mode("overwrite")
-            .option("partitionOverwriteMode", "dynamic")
-            .partitionBy("canonical_station_id")
-            .parquet(output_path)
-        )
+        writer = updated_touched.write.mode("overwrite").partitionBy("canonical_station_id")
+        if has_existing_output:
+            writer = writer.option("partitionOverwriteMode", "dynamic")
+        writer.parquet(output_path)
     else:
         touched_station_ids = []
 
