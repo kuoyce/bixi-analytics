@@ -481,16 +481,33 @@ def build_features_for_station(
 
 
 def write_gold_station_flow_partition_overwrite(flow_df: DataFrame, gold_path: str) -> None:
-    # Dynamic partition overwrite updates only station_id partitions present in flow_df.
-    flow_df.sparkSession.conf.set("spark.sql.sources.partitionOverwriteMode", "dynamic")
-    (
+    # Use writer-level config instead of sparkSession runtime mutation.
+    writer = (
         flow_df
         .repartition("station_id")
         .write
         .mode("overwrite")
         .partitionBy("station_id")
-        .parquet(gold_path)
     )
+
+    if os.path.exists(gold_path):
+        writer = writer.option("partitionOverwriteMode", "dynamic")
+
+    writer.parquet(gold_path)
+
+    if os.environ.get("DATABRICKS_RUNTIME_VERSION"):
+        db_name = os.environ.get("GOLD_DB_NAME", "bixi-fs")
+        table_name = os.environ.get("GOLD_TABLE_NAME", "station_flow")
+        full_table_name = f"`{db_name}`.`{table_name}`"
+        (
+            flow_df
+            .repartition("station_id")
+            .write
+            .mode("overwrite")
+            .partitionBy("station_id")
+            .saveAsTable(full_table_name)
+        )
+        print(f"Databricks table written: {full_table_name}")
 
 
 def main() -> None:
