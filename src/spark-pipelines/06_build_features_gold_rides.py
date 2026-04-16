@@ -150,7 +150,6 @@ def build_station_flow_agg(
         .agg(
             F.sum("station_inflow").cast("long").alias("station_inflow"),
             F.sum("station_outflow").cast("long").alias("station_outflow"),
-            (F.sum("station_inflow").cast("long") - F.sum("station_outflow").cast("long")).alias("station_netflow"),
         )
         .orderBy("ts_hour")
     )
@@ -275,6 +274,15 @@ def add_radius_flow_agg(
             F.sum(radius_outflow_col).cast("long").alias(radius_outflow_col),
         )
     )
+
+
+def add_station_netflow(
+    flow_df: DataFrame,
+    inflow_col: str = "station_inflow",
+    outflow_col: str = "station_outflow",
+    output_col: str = "station_netflow",
+) -> DataFrame:
+    return flow_df.withColumn(output_col, F.col(inflow_col).cast("long") - F.col(outflow_col).cast("long"))
 
 
 def fill_missing_hours_with_zero_flow(flow_df: DataFrame, timestamp_col: str = "ts_hour") -> DataFrame:
@@ -449,6 +457,7 @@ def build_features_for_station(
 ) -> DataFrame:
     flow_df = build_station_flow_agg(rides_df, station_id=station_id, time_grain=time_grain)
     flow_df = fill_missing_hours_with_zero_flow(flow_df)
+    flow_df = add_station_netflow(flow_df)
 
     for radius_meters in sorted({int(r) for r in radius_meters_list}):
         radius_agg_df = add_radius_flow_agg(
