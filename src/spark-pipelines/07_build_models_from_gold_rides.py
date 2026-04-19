@@ -439,15 +439,15 @@ def prune_feature_columns_with_random_forest(
 
 
 def main(sparkml_temp_dfs_path: str | None = None):
-    sync_databricks_widgets_to_env()
+
+    spark = get_spark()
+    apply_local_spark_defaults(spark)    
+    sync_databricks_widgets_to_env(spark)
 
     resolved_sparkml_temp_dfs_path = resolve_sparkml_temp_dfs_path(sparkml_temp_dfs_path)
     if resolved_sparkml_temp_dfs_path:
         os.environ["SPARKML_TEMP_DFS_PATH"] = resolved_sparkml_temp_dfs_path
 
-    spark = get_spark()
-    apply_local_spark_defaults(spark)
-    
     base_path = resolve_data_path()
     run_id, run_ts = generate_run_metadata()
     model_root_path = build_storage_path(base_path, "models", run_id)

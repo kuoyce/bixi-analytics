@@ -105,7 +105,7 @@ def is_databricks_runtime() -> bool:
     return bool(os.environ.get("DATABRICKS_RUNTIME_VERSION"))
 
 
-def sync_databricks_widgets_to_env() -> dict[str, str]:
+def sync_databricks_widgets_to_env(spark) -> dict[str, str]:
     """
     On Databricks, copy all widget parameters into process environment variables.
     Returns the applied key/value mapping.
@@ -114,6 +114,8 @@ def sync_databricks_widgets_to_env() -> dict[str, str]:
         return {}
 
     try:
+        from pyspark.dbutils import DBUtils
+        dbutils = DBUtils(spark)
         params = dbutils.widgets.getAll()
     except Exception as exc:
         print(f"Info: unable to read Databricks widgets ({exc})")

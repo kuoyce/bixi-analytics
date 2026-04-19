@@ -273,10 +273,10 @@ def evaluate_station(
 
 
 def main() -> None:
-    sync_databricks_widgets_to_env()
-
+    
     spark = get_spark()
-    apply_local_spark_defaults(spark)
+    apply_local_spark_defaults(spark)    
+    sync_databricks_widgets_to_env(spark)
 
     base_path = resolve_data_path()
     model_root_path = build_storage_path(base_path, "models")

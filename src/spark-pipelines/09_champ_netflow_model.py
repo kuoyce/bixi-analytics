@@ -217,10 +217,10 @@ def save_current_champion_if_enabled(
 
 
 def main() -> None:
-    sync_databricks_widgets_to_env()
-
+    
     spark = get_spark()
-    apply_local_spark_defaults(spark)
+    apply_local_spark_defaults(spark)    
+    sync_databricks_widgets_to_env(spark)
 
     base_path = resolve_data_path()
     min_rmse_improvement = float(os.environ.get("CHAMP_MIN_RMSE_IMPROVEMENT", "0.05"))
