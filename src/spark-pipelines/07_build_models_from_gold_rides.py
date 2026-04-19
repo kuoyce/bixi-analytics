@@ -6,6 +6,7 @@ from pyspark.sql import SparkSession
 from pyspark.sql import DataFrame
 from pyspark.sql import functions as F
 from pyspark.sql.functions import udf
+from pyspark.storagelevel import StorageLevel
 from pyspark.ml.evaluation import RegressionEvaluator
 from pyspark.ml.regression import GBTRegressor, LinearRegression, RandomForestRegressor, DecisionTreeRegressor, GeneralizedLinearRegression
 from pyspark.ml.feature import VectorAssembler, PCA, UnivariateFeatureSelector
@@ -166,6 +167,19 @@ def save_best_model(best_model, model_path: str) -> None:
     best_model.write().overwrite().save(model_path)
 
 
+def clear_spark_caches_safe(spark) -> None:
+    try:
+        spark.catalog.clearCache()
+    except Exception as exc:
+        print(f"Info: unable to clear Spark catalog cache ({exc})")
+
+    try:
+        spark.sql("CLEAR CACHE")
+    except Exception:
+        # Some runtimes may not support SQL cache management calls consistently.
+        pass
+
+
 def write_summary_rows(spark, summary_rows: list[dict], summary_path: str, run_id: str) -> str | None:
     if not summary_rows:
         return None
@@ -318,6 +332,7 @@ def build_model_for_station(
             del paramGrid
             del best_param_map
             del best_params
+            clear_spark_caches_safe(spark)
             gc.collect()
 
     return results
@@ -422,57 +437,93 @@ def main(sparkml_temp_dfs_path: str | None = None):
     for idx, station_id in enumerate(station_ids, start=1):
         print(f"[{idx}/{len(station_ids)}] Building model for station: {station_id}")
         for TARGET_COL in ['station_inflow', 'station_outflow']:
+            station_flow_df = None
+            station_df = None
+            train_df = None
+            test_df = None
+            fit_train_df = None
+            fit_test_df = None
+            importance_df = None
+            results = None
 
-            # Filter the flow DataFrame for the specific station
-            station_flow_df = flow_df.filter(F.col("station_id") == station_id)
-            station_df = fillna_numerics_and_booleans(station_flow_df, NUMERIC_COLS, BOOLEAN_COLS)
-            train_df, test_df = split_train_test_by_cutoff(station_df)
+            try:
+                # Filter the flow DataFrame for the specific station.
+                station_flow_df = flow_df.filter(F.col("station_id") == station_id)
+                station_df = fillna_numerics_and_booleans(station_flow_df, NUMERIC_COLS, BOOLEAN_COLS)
+                train_df, test_df = split_train_test_by_cutoff(station_df)
 
-            reduced_categorical_cols, reduced_numeric_cols, importance_df = prune_feature_columns_with_random_forest(
-                train_df=train_df,
-                target_col=TARGET_COL,
-                categorical_cols=CATEGORICAL_COLS,
-                numeric_cols=NUMERIC_COLS,
-            )
+                reduced_categorical_cols, reduced_numeric_cols, importance_df = prune_feature_columns_with_random_forest(
+                    train_df=train_df,
+                    target_col=TARGET_COL,
+                    categorical_cols=CATEGORICAL_COLS,
+                    numeric_cols=NUMERIC_COLS,
+                )
 
-            print(f"Building model for station {station_id} with {station_flow_df.count()} records")
-            print(
-                f"Pruned feature set for {TARGET_COL}: "
-                f"{len(reduced_numeric_cols)} numeric, {len(reduced_categorical_cols)} categorical"
-            )
-            print("Top 10 feature importances:")
-            print(importance_df.head(10))
+                print(f"Building model for station {station_id} with {station_flow_df.count()} records")
+                print(
+                    f"Pruned feature set for {TARGET_COL}: "
+                    f"{len(reduced_numeric_cols)} numeric, {len(reduced_categorical_cols)} categorical"
+                )
+                print("Top 10 feature importances:")
+                print(importance_df.head(10))
 
-            results = build_model_for_station(
-                spark,
-                station_id,
-                run_id,
-                run_ts,
-                train_df,
-                test_df,
-                TARGET_COL=TARGET_COL,
-                CATEGORICAL_COLS=reduced_categorical_cols,
-                NUMERIC_COLS=reduced_numeric_cols,
-                model_root_path=model_root_path,
-            )
-            print(pd.DataFrame(results)[["model_name", "rmse", "mae"]].sort_values("rmse"))
-            summary_rows.extend(
-                [
-                    {
-                        "run_id": row["run_id"],
-                        "run_ts": row["run_ts"],
-                        "station_id": row["station_id"],
-                        "target_col": row["target_col"],
-                        "model_name": row["model_name"],
-                        "model_path": row["model_path"],
-                        "rmse": row["rmse"],
-                        "mae": row["mae"],
-                        "cv_mae": row["cv_mae"],
-                        "best_params_json": json.dumps(row["best_params"], default=str),
-                    }
-                    for row in results
-                ]
-            )
+                # Narrow the fit/test inputs to only required columns to reduce executor-side footprint.
+                fit_columns = [TIME_COL, TARGET_COL] + reduced_categorical_cols + reduced_numeric_cols
+                fit_train_df = train_df.select(*fit_columns).persist(StorageLevel.DISK_ONLY)
+                fit_test_df = test_df.select(*fit_columns).persist(StorageLevel.DISK_ONLY)
+                fit_train_df.count()
+                fit_test_df.count()
+
+                results = build_model_for_station(
+                    spark,
+                    station_id,
+                    run_id,
+                    run_ts,
+                    fit_train_df,
+                    fit_test_df,
+                    TARGET_COL=TARGET_COL,
+                    CATEGORICAL_COLS=reduced_categorical_cols,
+                    NUMERIC_COLS=reduced_numeric_cols,
+                    model_root_path=model_root_path,
+                )
+                print(pd.DataFrame(results)[["model_name", "rmse", "mae"]].sort_values("rmse"))
+                summary_rows.extend(
+                    [
+                        {
+                            "run_id": row["run_id"],
+                            "run_ts": row["run_ts"],
+                            "station_id": row["station_id"],
+                            "target_col": row["target_col"],
+                            "model_name": row["model_name"],
+                            "model_path": row["model_path"],
+                            "rmse": row["rmse"],
+                            "mae": row["mae"],
+                            "cv_mae": row["cv_mae"],
+                            "best_params_json": json.dumps(row["best_params"], default=str),
+                        }
+                        for row in results
+                    ]
+                )
+            finally:
+                for df_ref in (fit_train_df, fit_test_df, train_df, test_df, station_df, station_flow_df):
+                    if df_ref is not None:
+                        try:
+                            df_ref.unpersist(blocking=True)
+                        except Exception:
+                            pass
+                clear_spark_caches_safe(spark)
+                del station_flow_df
+                del station_df
+                del train_df
+                del test_df
+                del fit_train_df
+                del fit_test_df
+                del importance_df
+                del results
+                gc.collect()
+
+        clear_spark_caches_safe(spark)
+        gc.collect()
 
     solo_summary_path = build_storage_path(base_path, "models", "summary", "solo", run_id)
     solo_table_name = write_summary_rows(
