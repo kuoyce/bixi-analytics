@@ -23,6 +23,7 @@ from sparkutils import (
     resolve_data_path,
     resolve_summary_table_target,
     should_write_summary_tables,
+    sync_databricks_widgets_to_env,
 )
 
 
@@ -216,6 +217,8 @@ def save_current_champion_if_enabled(
 
 
 def main() -> None:
+    sync_databricks_widgets_to_env()
+
     spark = get_spark()
     apply_local_spark_defaults(spark)
 

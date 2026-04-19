@@ -1,5 +1,6 @@
 
 import datetime
+import importlib
 import os
 import uuid
 from pyspark.sql import SparkSession
@@ -102,6 +103,62 @@ def _str_to_bool(value: str | None, default: bool = False) -> bool:
 
 def is_databricks_runtime() -> bool:
     return bool(os.environ.get("DATABRICKS_RUNTIME_VERSION"))
+
+
+def sync_databricks_widgets_to_env() -> dict[str, str]:
+    """
+    On Databricks, copy all widget parameters into process environment variables.
+    Returns the applied key/value mapping.
+    """
+    if not is_databricks_runtime():
+        return {}
+
+    dbutils_obj = None
+    import_error = None
+
+    # Import dbutils only after confirming Databricks runtime.
+    try:
+        dbutils_module = importlib.import_module("pyspark.dbutils")
+        DBUtils = getattr(dbutils_module, "DBUtils")
+        spark = SparkSession.getActiveSession() or SparkSession.builder.getOrCreate()
+        dbutils_obj = DBUtils(spark)
+    except Exception as exc:
+        import_error = exc
+
+    if dbutils_obj is None:
+        try:
+            import builtins
+
+            dbutils_obj = getattr(builtins, "dbutils", None)
+        except Exception:
+            dbutils_obj = None
+
+    if dbutils_obj is None:
+        if import_error is not None:
+            print(f"Info: Databricks runtime detected but dbutils is unavailable ({import_error})")
+        else:
+            print("Info: Databricks runtime detected but dbutils is unavailable")
+        return {}
+
+    try:
+        params = dbutils_obj.widgets.getAll()
+    except Exception as exc:
+        print(f"Info: unable to read Databricks widgets ({exc})")
+        return {}
+
+    applied: dict[str, str] = {}
+    for key, value in params.items():
+        env_key = str(key)
+        env_value = "" if value is None else str(value)
+        os.environ[env_key] = env_value
+        applied[env_key] = env_value
+
+    if applied:
+        sample_key = next(iter(applied))
+        print(f"Loaded {len(applied)} Databricks widget parameter(s) into environment")
+        print(f"Verified: {os.getenv(sample_key)}")
+
+    return applied
 
 
 def is_production_mode() -> bool:

@@ -20,6 +20,7 @@ from sparkutils import (
     resolve_data_path,
     resolve_summary_table_target,
     should_write_summary_tables,
+    sync_databricks_widgets_to_env,
 )
 
 HARD_CODED_STATION_IDS: list[str] = ['STN_0001', 'STN_0002', 'STN_0003', 'STN_0004', 'STN_0005', 'STN_0006']
@@ -272,6 +273,8 @@ def evaluate_station(
 
 
 def main() -> None:
+    sync_databricks_widgets_to_env()
+
     spark = get_spark()
     apply_local_spark_defaults(spark)
 

@@ -36,6 +36,7 @@ from sparkutils import (
     resolve_pipeline_run_metadata,
     resolve_summary_table_target,
     should_write_summary_tables,
+    sync_databricks_widgets_to_env,
 )
 from sparkutils import tsCrossValidator
 
@@ -438,6 +439,8 @@ def prune_feature_columns_with_random_forest(
 
 
 def main(sparkml_temp_dfs_path: str | None = None):
+    sync_databricks_widgets_to_env()
+
     resolved_sparkml_temp_dfs_path = resolve_sparkml_temp_dfs_path(sparkml_temp_dfs_path)
     if resolved_sparkml_temp_dfs_path:
         os.environ["SPARKML_TEMP_DFS_PATH"] = resolved_sparkml_temp_dfs_path
