@@ -9,19 +9,34 @@ from pyspark.ml.evaluation import RegressionEvaluator
 from pyspark.ml.regression import GBTRegressor, LinearRegression, RandomForestRegressor, DecisionTreeRegressor, GeneralizedLinearRegression
 from pyspark.ml.feature import VectorAssembler, PCA, UnivariateFeatureSelector
 from pyspark.ml.feature import OneHotEncoderModel
+from pyspark.ml.tuning import ParamGridBuilder
 
 import matplotlib.pyplot as plt
 import pandas as pd
 import json
 import math
 import os
-import re
+import numpy as np
+import uuid
 
 from pyspark.ml.feature import StringIndexer, OneHotEncoder, VectorAssembler, StandardScaler
 from pyspark.ml import Pipeline
 import seaborn as sns
 
-from sparkutils import get_spark, resolve_data_path, apply_local_spark_defaults, asymmetric_loss_col, asymmetric_loss_mean
+from sparkutils import (
+    append_run_df_to_delta_table,
+    apply_local_spark_defaults,
+    asymmetric_loss_col,
+    asymmetric_loss_mean,
+    get_spark,
+    resolve_data_path,
+    resolve_pipeline_run_metadata,
+    resolve_summary_table_target,
+    should_write_summary_tables,
+)
+from sparkutils import tsCrossValidator
+
+import datetime
 
 HARD_CODED_STATION_IDS: list[str] = ['STN_0001', 'STN_0002', 'STN_0003', 'STN_0004', 'STN_0005', 'STN_0006']
 
@@ -146,6 +161,51 @@ def fit_and_evaluate(model_name, estimator, train_data, eval_data, target_col):
         "mae": metrics["mae"],
     }
 
+
+def save_best_model(best_model, model_path: str) -> None:
+    best_model.write().overwrite().save(model_path)
+
+
+def write_summary_rows(spark, summary_rows: list[dict], summary_path: str, run_id: str) -> str | None:
+    if not summary_rows:
+        return None
+
+    summary_df = spark.createDataFrame(summary_rows).cache()
+    summary_df.count()
+    summary_df.write.mode("overwrite").parquet(summary_path)
+
+    table_name = None
+    if should_write_summary_tables():
+        catalog, schema, table, _ = resolve_summary_table_target(
+            default_table="solo",
+            env_key="PIPELINE_TABLE_SOLO",
+        )
+        table_name = append_run_df_to_delta_table(
+            spark=spark,
+            df=summary_df,
+            catalog=catalog,
+            schema=schema,
+            table=table,
+            run_id=run_id,
+            run_id_col="run_id",
+        )
+
+    summary_df.unpersist()
+    return table_name
+
+
+def build_storage_path(base_path: str, *parts: str) -> str:
+    base = base_path.rstrip("/")
+    suffix = "/".join(str(p).strip("/") for p in parts)
+    return f"{base}/{suffix}" if suffix else base
+
+
+def generate_run_metadata() -> tuple[str, str]:
+    return resolve_pipeline_run_metadata(
+        fallback_envs=("STAGE7_RUN_ID",),
+        require_run_id_in_production=False,
+    )
+
 def get_baseline_models(TARGET_COL):
     return {
         "GBTRegressor": GBTRegressor(featuresCol="features", labelCol=TARGET_COL, seed=42),
@@ -155,7 +215,43 @@ def get_baseline_models(TARGET_COL):
         "GeneralizedLinearRegression": GeneralizedLinearRegression(featuresCol="features", labelCol=TARGET_COL,family="poisson",link="log"),
     }
 
-def build_model_for_station(train_df, test_df, TARGET_COL: str, CATEGORICAL_COLS: list[str], NUMERIC_COLS: list[str]) -> None:
+def get_baseline_models(TARGET_COL):
+    return {
+        "GBTRegressor": {
+            "estimator": GBTRegressor(featuresCol="features", labelCol=TARGET_COL, seed=42),
+            "paramGrid": ParamGridBuilder().addGrid(GBTRegressor.maxDepth, [5, 7]).addGrid(GBTRegressor.maxIter, [100, 120]).build()
+        },
+        "RandomForestRegressor": {
+            "estimator": RandomForestRegressor(featuresCol="features", labelCol=TARGET_COL, seed=42),
+            "paramGrid": ParamGridBuilder().addGrid(RandomForestRegressor.maxDepth, [8, 10]).addGrid(RandomForestRegressor.numTrees, [120, 160]).build()
+        },
+        "LinearRegression": {
+            "estimator": LinearRegression(featuresCol="features", labelCol=TARGET_COL, maxIter=100, regParam=0.1),
+            "paramGrid": ParamGridBuilder().addGrid(LinearRegression.regParam, [0.01, 0.1, 1.0]).addGrid(LinearRegression.elasticNetParam, [0.1, 8.0]).build()
+        },
+        "DecisionTreeRegressor": {
+            "estimator": DecisionTreeRegressor(featuresCol="features", labelCol=TARGET_COL, seed=42),
+            "paramGrid": ParamGridBuilder().addGrid(DecisionTreeRegressor.maxDepth, [3, 5, 7]).build()
+        },
+        "GeneralizedLinearRegression": {
+            "estimator": GeneralizedLinearRegression(featuresCol="features", labelCol=TARGET_COL,family="poisson",link="log"),
+            "paramGrid": ParamGridBuilder().addGrid(GeneralizedLinearRegression.regParam, [0.01, 0.1, 1.0]).build()
+        }
+    }
+
+
+def build_model_for_station(
+    spark,
+    station_id: str,
+    run_id: str,
+    run_ts: str,
+    train_df,
+    test_df,
+    TARGET_COL: str,
+    CATEGORICAL_COLS: list[str],
+    NUMERIC_COLS: list[str],
+    model_root_path: str,
+) -> list[dict]:
 
     # print("Schema:")
     # station_flow_df.printSchema()
@@ -168,10 +264,44 @@ def build_model_for_station(train_df, test_df, TARGET_COL: str, CATEGORICAL_COLS
     stages = create_preprocessing_pipeline_stages(CATEGORICAL_COLS, NUMERIC_COLS, TARGET_COL)
     baseline_models = get_baseline_models(TARGET_COL)
     results = []
-    for estimator__name, model in baseline_models.items():
-        print(f"Training {estimator__name} - Target: {TARGET_COL}")
+    for estimator__name, model_dt in baseline_models.items():
+        model, paramGrid  = model_dt["estimator"], model_dt["paramGrid"]
+
+        print(f"Tuning for {estimator__name} - Target: {TARGET_COL}")
         estimator = Pipeline(stages=stages + [model])
-        res = fit_and_evaluate(estimator__name, estimator, train_df, test_df, TARGET_COL)
+
+        tsv_est = tsCrossValidator(estimator=estimator, estimatorParamMaps=paramGrid, timeSplit=datetime.timedelta(days=30),
+                                   evaluator=RegressionEvaluator(labelCol=TARGET_COL, predictionCol="prediction", metricName="mae"), datetimeCol='ts_hour', 
+                                   numFolds=3)
+        tsv_model = tsv_est.fit(train_df)
+
+        # Extract and print winning parameters from the fitted CV model.
+        best_idx = int(np.argmin(tsv_model.avgMetrics))
+        best_mae = float(tsv_model.avgMetrics[best_idx])
+        best_param_map = tsv_model.getEstimatorParamMaps()[best_idx]
+        best_params = {param.name: value for param, value in best_param_map.items()}
+        print(f"Best params for {estimator__name} ({TARGET_COL}) [cv_mae={best_mae:.4f}]:")
+        for param_name, value in best_params.items():
+            print(f"  {param_name}: {value}")
+
+        pred = tsv_model.bestModel.transform(test_df)
+        metrics = evaluate_predictions(pred, TARGET_COL)
+        model_path = build_storage_path(model_root_path, station_id, TARGET_COL, estimator__name)
+        save_best_model(tsv_model.bestModel, model_path)
+        res = {
+            "run_id": run_id,
+            "run_ts": run_ts,
+            "station_id": station_id,
+            "target_col": TARGET_COL,
+            "model_name": estimator__name,
+            "model_path": model_path,
+            "fitted_model": tsv_model.bestModel,
+            "predictions": pred,
+            "rmse": metrics["rmse"],
+            "mae": metrics["mae"],
+            "cv_mae": best_mae,
+            "best_params": best_params,
+        }
         results.append(res)
 
     return results
@@ -240,7 +370,6 @@ def prune_feature_columns_with_random_forest(
             reduced_numeric_cols = [top_feature]
 
     return reduced_categorical_cols, reduced_numeric_cols, importance_df
-    
 
 
 
@@ -249,10 +378,16 @@ def main():
     apply_local_spark_defaults(spark)
     
     base_path = resolve_data_path()
+    run_id, run_ts = generate_run_metadata()
+    model_root_path = build_storage_path(base_path, "models", run_id)
     flow_df, stations_df = load_gold_inputs(spark, base_path)
     station_ids = resolve_target_station_ids(stations_df)
 
+    print(f"Run ID: {run_id}")
+    print(f"Run TS (UTC): {run_ts}")
+
     NUMERIC_COLS, CATEGORICAL_COLS, BOOLEAN_COLS, TIME_COL, _ = get_columns()
+    summary_rows = []
 
     for idx, station_id in enumerate(station_ids, start=1):
         print(f"[{idx}/{len(station_ids)}] Building model for station: {station_id}")
@@ -279,14 +414,47 @@ def main():
             print(importance_df.head(10))
 
             results = build_model_for_station(
+                spark,
+                station_id,
+                run_id,
+                run_ts,
                 train_df,
                 test_df,
                 TARGET_COL=TARGET_COL,
                 CATEGORICAL_COLS=reduced_categorical_cols,
                 NUMERIC_COLS=reduced_numeric_cols,
+                model_root_path=model_root_path,
             )
             print(pd.DataFrame(results)[["model_name", "rmse", "mae"]].sort_values("rmse"))
-            exit(0)
+            summary_rows.extend(
+                [
+                    {
+                        "run_id": row["run_id"],
+                        "run_ts": row["run_ts"],
+                        "station_id": row["station_id"],
+                        "target_col": row["target_col"],
+                        "model_name": row["model_name"],
+                        "model_path": row["model_path"],
+                        "rmse": row["rmse"],
+                        "mae": row["mae"],
+                        "cv_mae": row["cv_mae"],
+                        "best_params_json": json.dumps(row["best_params"], default=str),
+                    }
+                    for row in results
+                ]
+            )
+
+    solo_summary_path = build_storage_path(base_path, "models", "summary", "solo", run_id)
+    solo_table_name = write_summary_rows(
+        spark,
+        summary_rows,
+        solo_summary_path,
+        run_id=run_id,
+    )
+
+    print(f"Saved solo summary path: {solo_summary_path}")
+    if solo_table_name:
+        print(f"Appended solo summary table: {solo_table_name}")
 
 
 if __name__ == "__main__":
