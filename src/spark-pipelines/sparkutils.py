@@ -113,35 +113,8 @@ def sync_databricks_widgets_to_env() -> dict[str, str]:
     if not is_databricks_runtime():
         return {}
 
-    dbutils_obj = None
-    import_error = None
-
-    # Import dbutils only after confirming Databricks runtime.
     try:
-        dbutils_module = importlib.import_module("pyspark.dbutils")
-        DBUtils = getattr(dbutils_module, "DBUtils")
-        spark = SparkSession.getActiveSession() or SparkSession.builder.getOrCreate()
-        dbutils_obj = DBUtils(spark)
-    except Exception as exc:
-        import_error = exc
-
-    if dbutils_obj is None:
-        try:
-            import builtins
-
-            dbutils_obj = getattr(builtins, "dbutils", None)
-        except Exception:
-            dbutils_obj = None
-
-    if dbutils_obj is None:
-        if import_error is not None:
-            print(f"Info: Databricks runtime detected but dbutils is unavailable ({import_error})")
-        else:
-            print("Info: Databricks runtime detected but dbutils is unavailable")
-        return {}
-
-    try:
-        params = dbutils_obj.widgets.getAll()
+        params = dbutils.widgets.getAll()
     except Exception as exc:
         print(f"Info: unable to read Databricks widgets ({exc})")
         return {}
