@@ -180,11 +180,41 @@ def clear_spark_caches_safe(spark) -> None:
         pass
 
 
+def is_serverless_persist_unsupported(exc: Exception) -> bool:
+    msg = str(exc)
+    return (
+        "NOT_SUPPORTED_WITH_SERVERLESS" in msg
+        or "PERSIST TABLE is not supported on serverless compute" in msg
+    )
+
+
+def persist_df_best_effort(
+    df: DataFrame,
+    storage_level: StorageLevel,
+    label: str,
+) -> tuple[DataFrame, bool]:
+    try:
+        persisted_df = df.persist(storage_level)
+        # Force materialization so unsupported cache operations fail here and can fallback cleanly.
+        persisted_df.count()
+        return persisted_df, True
+    except Exception as exc:
+        if is_serverless_persist_unsupported(exc):
+            print(f"Info: {label} persistence skipped on serverless ({exc})")
+            return df, False
+        raise
+
+
 def write_summary_rows(spark, summary_rows: list[dict], summary_path: str, run_id: str) -> str | None:
     if not summary_rows:
         return None
 
-    summary_df = spark.createDataFrame(summary_rows).cache()
+    summary_df = spark.createDataFrame(summary_rows)
+    summary_df, summary_df_cached = persist_df_best_effort(
+        summary_df,
+        StorageLevel.MEMORY_AND_DISK,
+        label="stage07 summary",
+    )
     summary_df.count()
     summary_df.write.mode("overwrite").parquet(summary_path)
 
@@ -204,7 +234,8 @@ def write_summary_rows(spark, summary_rows: list[dict], summary_path: str, run_i
             run_id_col="run_id",
         )
 
-    summary_df.unpersist()
+    if summary_df_cached:
+        summary_df.unpersist(blocking=True)
     return table_name
 
 
@@ -443,6 +474,8 @@ def main(sparkml_temp_dfs_path: str | None = None):
             test_df = None
             fit_train_df = None
             fit_test_df = None
+            fit_train_cached = False
+            fit_test_cached = False
             importance_df = None
             results = None
 
@@ -469,10 +502,16 @@ def main(sparkml_temp_dfs_path: str | None = None):
 
                 # Narrow the fit/test inputs to only required columns to reduce executor-side footprint.
                 fit_columns = [TIME_COL, TARGET_COL] + reduced_categorical_cols + reduced_numeric_cols
-                fit_train_df = train_df.select(*fit_columns).persist(StorageLevel.DISK_ONLY)
-                fit_test_df = test_df.select(*fit_columns).persist(StorageLevel.DISK_ONLY)
-                fit_train_df.count()
-                fit_test_df.count()
+                fit_train_df, fit_train_cached = persist_df_best_effort(
+                    train_df.select(*fit_columns),
+                    StorageLevel.DISK_ONLY,
+                    label=f"{station_id}/{TARGET_COL} train",
+                )
+                fit_test_df, fit_test_cached = persist_df_best_effort(
+                    test_df.select(*fit_columns),
+                    StorageLevel.DISK_ONLY,
+                    label=f"{station_id}/{TARGET_COL} test",
+                )
 
                 results = build_model_for_station(
                     spark,
@@ -505,12 +544,16 @@ def main(sparkml_temp_dfs_path: str | None = None):
                     ]
                 )
             finally:
-                for df_ref in (fit_train_df, fit_test_df, train_df, test_df, station_df, station_flow_df):
-                    if df_ref is not None:
-                        try:
-                            df_ref.unpersist(blocking=True)
-                        except Exception:
-                            pass
+                if fit_train_cached and fit_train_df is not None:
+                    try:
+                        fit_train_df.unpersist(blocking=True)
+                    except Exception:
+                        pass
+                if fit_test_cached and fit_test_df is not None:
+                    try:
+                        fit_test_df.unpersist(blocking=True)
+                    except Exception:
+                        pass
                 clear_spark_caches_safe(spark)
                 del station_flow_df
                 del station_df
@@ -518,6 +561,8 @@ def main(sparkml_temp_dfs_path: str | None = None):
                 del test_df
                 del fit_train_df
                 del fit_test_df
+                del fit_train_cached
+                del fit_test_cached
                 del importance_df
                 del results
                 gc.collect()
