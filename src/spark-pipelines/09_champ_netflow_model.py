@@ -65,6 +65,12 @@ def load_current_champion(spark, base_path: str) -> DataFrame | None:
 
 def resolve_combi_run_id(combi_df: DataFrame) -> tuple[str, str]:
     env_run_id = os.environ.get("PIPELINE_RUN_ID") or os.environ.get("CHAMP_RUN_ID")
+    if not env_run_id:
+        job_run_id = os.environ.get("PIPELINE_JOB_RUN_ID")
+        if job_run_id and job_run_id.strip():
+            repair_count = os.environ.get("PIPELINE_REPAIR_COUNT", "0").strip() or "0"
+            env_run_id = f"job_{job_run_id.strip()}_repair_{repair_count}"
+
     if env_run_id:
         row = (
             combi_df.where(F.col("run_id") == env_run_id)
@@ -80,7 +86,8 @@ def resolve_combi_run_id(combi_df: DataFrame) -> tuple[str, str]:
     if is_production_mode():
         raise ValueError(
             "PIPELINE_RUN_ID is required in production mode for stage 09. "
-            "Pass Databricks {{job.run_id}} plus {{job.repair_count}} as PIPELINE_RUN_ID."
+            "Pass Databricks {{job.run_id}} plus {{job.repair_count}} as PIPELINE_RUN_ID, "
+            "or provide PIPELINE_JOB_RUN_ID and PIPELINE_REPAIR_COUNT."
         )
 
     latest = (

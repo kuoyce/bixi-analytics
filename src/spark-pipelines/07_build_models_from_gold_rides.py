@@ -19,6 +19,7 @@ import math
 import os
 import numpy as np
 import uuid
+import gc
 
 from pyspark.ml.feature import StringIndexer, OneHotEncoder, VectorAssembler, StandardScaler
 from pyspark.ml import Pipeline
@@ -156,8 +157,6 @@ def fit_and_evaluate(model_name, estimator, train_data, eval_data, target_col):
     metrics = evaluate_predictions(pred, target_col)
     return {
         "model_name": model_name,
-        "fitted_model": fitted,
-        "predictions": pred,
         "rmse": metrics["rmse"],
         "mae": metrics["mae"],
     }
@@ -296,14 +295,18 @@ def build_model_for_station(
             "target_col": TARGET_COL,
             "model_name": estimator__name,
             "model_path": model_path,
-            "fitted_model": tsv_model.bestModel,
-            "predictions": pred,
             "rmse": metrics["rmse"],
             "mae": metrics["mae"],
             "cv_mae": best_mae,
             "best_params": best_params,
         }
         results.append(res)
+
+        # Spark Connect keeps fitted models in session-side cache; release Python references
+        # aggressively to reduce cache growth when fitting many models in one session.
+        del pred
+        del tsv_model
+        gc.collect()
 
     return results
 
@@ -369,6 +372,11 @@ def prune_feature_columns_with_random_forest(
             reduced_categorical_cols = [top_feature]
         else:
             reduced_numeric_cols = [top_feature]
+
+    del rf_regressor_model
+    del rf_model
+    del rf_pipeline
+    gc.collect()
 
     return reduced_categorical_cols, reduced_numeric_cols, importance_df
 
