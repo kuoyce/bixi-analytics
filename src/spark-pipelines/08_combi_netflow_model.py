@@ -5,6 +5,7 @@ This stage reads stage-07 solo summaries and model artifacts, scores all combina
 station test data, and saves per-run combi results to models/summary/combi/{run_id}.
 """
 
+import argparse
 import os
 
 from pyspark.ml import PipelineModel
@@ -20,10 +21,15 @@ from sparkutils import (
     resolve_data_path,
     resolve_summary_table_target,
     should_write_summary_tables,
-    sync_databricks_widgets_to_env,
 )
 
 HARD_CODED_STATION_IDS: list[str] = ['STN_0001', 'STN_0002', 'STN_0003', 'STN_0004', 'STN_0005', 'STN_0006']
+
+
+def _set_env_if_provided(env_key: str, value: str | None) -> None:
+    if value is None:
+        return
+    os.environ[env_key] = str(value)
 
 def build_storage_path(base_path: str, *parts: str) -> str:
     base = base_path.rstrip("/")
@@ -57,12 +63,12 @@ def parse_station_ids(raw_value: str | None) -> list[str]:
 
 
 def resolve_target_station_ids(stations_df: DataFrame) -> list[str]:
-    env_station_ids = parse_station_ids(os.environ.get("STAGE8_STATION_IDS"))
+    env_station_ids = parse_station_ids(os.environ.get("PIPELINE_STATION_ID"))
     hardcoded_station_ids = sorted({sid.strip() for sid in HARD_CODED_STATION_IDS if sid and sid.strip()})
 
     if env_station_ids:
         requested_station_ids = env_station_ids
-        source = "env:STAGE8_STATION_IDS"
+        source = "env:PIPELINE_STATION_ID"
     elif hardcoded_station_ids:
         requested_station_ids = hardcoded_station_ids
         source = "HARD_CODED_STATION_IDS"
@@ -74,7 +80,7 @@ def resolve_target_station_ids(stations_df: DataFrame) -> list[str]:
         source = "all canonical station ids"
 
     if not requested_station_ids:
-        raise ValueError("No station ids resolved. Provide STAGE8_STATION_IDS or populate HARD_CODED_STATION_IDS.")
+        raise ValueError("No station ids resolved. Provide PIPELINE_STATION_ID or populate HARD_CODED_STATION_IDS.")
 
     existing_station_ids = {
         row["canonical_station_id"]
@@ -273,10 +279,9 @@ def evaluate_station(
 
 
 def main() -> None:
-    
+
     spark = get_spark()
-    apply_local_spark_defaults(spark)    
-    sync_databricks_widgets_to_env(spark)
+    apply_local_spark_defaults(spark)
 
     base_path = resolve_data_path()
     model_root_path = build_storage_path(base_path, "models")
@@ -386,4 +391,68 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Stage 08 combi netflow model evaluation")
+    parser.add_argument(
+        "--pipeline-station-id",
+        default=os.environ.get("PIPELINE_STATION_ID"),
+        help="Comma-separated station IDs to evaluate (maps to PIPELINE_STATION_ID)",
+    )
+    parser.add_argument(
+        "--pipeline-run-id",
+        default=os.environ.get("PIPELINE_RUN_ID"),
+        help="Run identifier (maps to PIPELINE_RUN_ID)",
+    )
+    parser.add_argument(
+        "--champ-run-id",
+        default=os.environ.get("CHAMP_RUN_ID"),
+        help="Alternate run identifier (maps to CHAMP_RUN_ID)",
+    )
+    parser.add_argument(
+        "--pipeline-job-run-id",
+        default=os.environ.get("PIPELINE_JOB_RUN_ID"),
+        help="Databricks job run id (maps to PIPELINE_JOB_RUN_ID)",
+    )
+    parser.add_argument(
+        "--pipeline-repair-count",
+        default=os.environ.get("PIPELINE_REPAIR_COUNT", "0"),
+        help="Databricks repair count (maps to PIPELINE_REPAIR_COUNT)",
+    )
+    parser.add_argument(
+        "--pipeline-mode",
+        default=os.environ.get("PIPELINE_MODE"),
+        help="Pipeline mode such as production/local (maps to PIPELINE_MODE)",
+    )
+    parser.add_argument(
+        "--pipeline-enable-table-writes",
+        default=os.environ.get("PIPELINE_ENABLE_TABLE_WRITES"),
+        help="Enable summary table writes (maps to PIPELINE_ENABLE_TABLE_WRITES)",
+    )
+    parser.add_argument(
+        "--pipeline-table-catalog",
+        default=os.environ.get("PIPELINE_TABLE_CATALOG", "workspace"),
+        help="Summary table catalog (maps to PIPELINE_TABLE_CATALOG)",
+    )
+    parser.add_argument(
+        "--pipeline-table-schema",
+        default=os.environ.get("PIPELINE_TABLE_SCHEMA", "bixi-fs"),
+        help="Summary table schema (maps to PIPELINE_TABLE_SCHEMA)",
+    )
+    parser.add_argument(
+        "--pipeline-table-combi",
+        default=os.environ.get("PIPELINE_TABLE_COMBI", "combi"),
+        help="Stage 08 summary table name (maps to PIPELINE_TABLE_COMBI)",
+    )
+    args = parser.parse_args()
+
+    _set_env_if_provided("PIPELINE_STATION_ID", args.pipeline_station_id)
+    _set_env_if_provided("PIPELINE_RUN_ID", args.pipeline_run_id)
+    _set_env_if_provided("CHAMP_RUN_ID", args.champ_run_id)
+    _set_env_if_provided("PIPELINE_JOB_RUN_ID", args.pipeline_job_run_id)
+    _set_env_if_provided("PIPELINE_REPAIR_COUNT", args.pipeline_repair_count)
+    _set_env_if_provided("PIPELINE_MODE", args.pipeline_mode)
+    _set_env_if_provided("PIPELINE_ENABLE_TABLE_WRITES", args.pipeline_enable_table_writes)
+    _set_env_if_provided("PIPELINE_TABLE_CATALOG", args.pipeline_table_catalog)
+    _set_env_if_provided("PIPELINE_TABLE_SCHEMA", args.pipeline_table_schema)
+    _set_env_if_provided("PIPELINE_TABLE_COMBI", args.pipeline_table_combi)
+
     main()

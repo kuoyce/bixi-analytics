@@ -1,6 +1,5 @@
 
 import datetime
-import importlib
 import os
 import uuid
 from pyspark.sql import SparkSession
@@ -103,37 +102,6 @@ def _str_to_bool(value: str | None, default: bool = False) -> bool:
 
 def is_databricks_runtime() -> bool:
     return bool(os.environ.get("DATABRICKS_RUNTIME_VERSION"))
-
-
-def sync_databricks_widgets_to_env(spark) -> dict[str, str]:
-    """
-    On Databricks, copy all widget parameters into process environment variables.
-    Returns the applied key/value mapping.
-    """
-    if not is_databricks_runtime():
-        return {}
-
-    try:
-        from pyspark.dbutils import DBUtils
-        dbutils = DBUtils(spark)
-        params = dbutils.widgets.getAll()
-    except Exception as exc:
-        print(f"Info: unable to read Databricks widgets ({exc})")
-        return {}
-
-    applied: dict[str, str] = {}
-    for key, value in params.items():
-        env_key = str(key)
-        env_value = "" if value is None else str(value)
-        os.environ[env_key] = env_value
-        applied[env_key] = env_value
-
-    if applied:
-        sample_key = next(iter(applied))
-        print(f"Loaded {len(applied)} Databricks widget parameter(s) into environment")
-        print(f"Verified: {os.getenv(sample_key)}")
-
-    return applied
 
 
 def is_production_mode() -> bool:

@@ -27,12 +27,12 @@ def parse_station_ids(raw_value: str | None) -> list[str]:
 
 
 def resolve_target_station_ids(stations_df: DataFrame) -> list[str]:
-    env_station_ids = parse_station_ids(os.environ.get("STAGE5_STATION_IDS"))
+    env_station_ids = parse_station_ids(os.environ.get("PIPELINE_STATION_ID"))
     hardcoded_station_ids = sorted({sid.strip() for sid in HARD_CODED_STATION_IDS if sid and sid.strip()})
 
     if env_station_ids:
         requested_station_ids = env_station_ids
-        source = "env:STAGE5_STATION_IDS"
+        source = "env:PIPELINE_STATION_ID"
     elif hardcoded_station_ids:
         requested_station_ids = hardcoded_station_ids
         source = "HARD_CODED_STATION_IDS"
@@ -44,7 +44,7 @@ def resolve_target_station_ids(stations_df: DataFrame) -> list[str]:
         source = "all canonical station ids"
 
     if not requested_station_ids:
-        raise ValueError("No station ids resolved. Provide STAGE5_STATION_IDS or populate HARD_CODED_STATION_IDS.")
+        raise ValueError("No station ids resolved. Provide PIPELINE_STATION_ID or populate HARD_CODED_STATION_IDS.")
 
     existing_station_ids = {
         row["canonical_station_id"]
