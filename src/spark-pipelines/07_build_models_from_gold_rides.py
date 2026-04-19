@@ -180,29 +180,19 @@ def clear_spark_caches_safe(spark) -> None:
         pass
 
 
-def is_serverless_persist_unsupported(exc: Exception) -> bool:
-    msg = str(exc)
-    return (
-        "NOT_SUPPORTED_WITH_SERVERLESS" in msg
-        or "PERSIST TABLE is not supported on serverless compute" in msg
-    )
-
-
 def persist_df_best_effort(
     df: DataFrame,
     storage_level: StorageLevel,
     label: str,
 ) -> tuple[DataFrame, bool]:
-    try:
-        persisted_df = df.persist(storage_level)
-        # Force materialization so unsupported cache operations fail here and can fallback cleanly.
-        persisted_df.count()
-        return persisted_df, True
-    except Exception as exc:
-        if is_serverless_persist_unsupported(exc):
-            print(f"Info: {label} persistence skipped on serverless ({exc})")
-            return df, False
-        raise
+    if os.environ.get("DATABRICKS_RUNTIME_VERSION"):
+        print(f"Info: {label} persistence skipped on Databricks runtime")
+        return df, False
+
+    persisted_df = df.persist(storage_level)
+    # Force materialization so downstream reuse benefits from persistence.
+    persisted_df.count()
+    return persisted_df, True
 
 
 def write_summary_rows(spark, summary_rows: list[dict], summary_path: str, run_id: str) -> str | None:
