@@ -208,15 +208,6 @@ def generate_run_metadata() -> tuple[str, str]:
 
 def get_baseline_models(TARGET_COL):
     return {
-        "GBTRegressor": GBTRegressor(featuresCol="features", labelCol=TARGET_COL, seed=42),
-        "RandomForestRegressor": RandomForestRegressor(featuresCol="features", labelCol=TARGET_COL, seed=42),
-        "LinearRegression": LinearRegression(featuresCol="features", labelCol=TARGET_COL, maxIter=100, regParam=0.1),
-        "DecisionTreeRegressor": DecisionTreeRegressor(featuresCol="features", labelCol=TARGET_COL, seed=42),
-        "GeneralizedLinearRegression": GeneralizedLinearRegression(featuresCol="features", labelCol=TARGET_COL,family="poisson",link="log"),
-    }
-
-def get_baseline_models(TARGET_COL):
-    return {
         "GBTRegressor": {
             "estimator": GBTRegressor(featuresCol="features", labelCol=TARGET_COL, seed=42),
             "paramGrid": ParamGridBuilder().addGrid(GBTRegressor.maxDepth, [5, 7]).addGrid(GBTRegressor.maxIter, [100, 120]).build()
@@ -264,49 +255,70 @@ def build_model_for_station(
     stages = create_preprocessing_pipeline_stages(CATEGORICAL_COLS, NUMERIC_COLS, TARGET_COL)
     baseline_models = get_baseline_models(TARGET_COL)
     results = []
+    cv_num_folds = int(os.environ.get("STAGE7_CV_NUM_FOLDS", "3"))
     for estimator__name, model_dt in baseline_models.items():
         model, paramGrid  = model_dt["estimator"], model_dt["paramGrid"]
 
         print(f"Tuning for {estimator__name} - Target: {TARGET_COL}")
         estimator = Pipeline(stages=stages + [model])
+        print(f"  Grid size: {len(paramGrid)} | CV folds: {cv_num_folds}")
 
-        tsv_est = tsCrossValidator(estimator=estimator, estimatorParamMaps=paramGrid, timeSplit=datetime.timedelta(days=30),
-                                   evaluator=RegressionEvaluator(labelCol=TARGET_COL, predictionCol="prediction", metricName="mae"), datetimeCol='ts_hour', 
-                                   numFolds=3)
-        tsv_model = tsv_est.fit(train_df)
+        pred = None
+        tsv_model = None
+        best_param_map = None
+        best_params = None
 
-        # Extract and print winning parameters from the fitted CV model.
-        best_idx = int(np.argmin(tsv_model.avgMetrics))
-        best_mae = float(tsv_model.avgMetrics[best_idx])
-        best_param_map = tsv_model.getEstimatorParamMaps()[best_idx]
-        best_params = {param.name: value for param, value in best_param_map.items()}
-        print(f"Best params for {estimator__name} ({TARGET_COL}) [cv_mae={best_mae:.4f}]:")
-        for param_name, value in best_params.items():
-            print(f"  {param_name}: {value}")
+        tsv_est = tsCrossValidator(
+            estimator=estimator,
+            estimatorParamMaps=paramGrid,
+            timeSplit=datetime.timedelta(days=30),
+            evaluator=RegressionEvaluator(labelCol=TARGET_COL, predictionCol="prediction", metricName="mae"),
+            datetimeCol='ts_hour',
+            numFolds=cv_num_folds,
+            parallelism=1,
+            collectSubModels=False,
+        )
+        try:
+            tsv_model = tsv_est.fit(train_df)
 
-        pred = tsv_model.bestModel.transform(test_df)
-        metrics = evaluate_predictions(pred, TARGET_COL)
-        model_path = build_storage_path(model_root_path, station_id, TARGET_COL, estimator__name)
-        save_best_model(tsv_model.bestModel, model_path)
-        res = {
-            "run_id": run_id,
-            "run_ts": run_ts,
-            "station_id": station_id,
-            "target_col": TARGET_COL,
-            "model_name": estimator__name,
-            "model_path": model_path,
-            "rmse": metrics["rmse"],
-            "mae": metrics["mae"],
-            "cv_mae": best_mae,
-            "best_params": best_params,
-        }
-        results.append(res)
+            # Extract and print winning parameters from the fitted CV model.
+            best_idx = int(np.argmin(tsv_model.avgMetrics))
+            best_mae = float(tsv_model.avgMetrics[best_idx])
+            best_param_map = tsv_model.getEstimatorParamMaps()[best_idx]
+            best_params = {param.name: value for param, value in best_param_map.items()}
+            print(f"Best params for {estimator__name} ({TARGET_COL}) [cv_mae={best_mae:.4f}]:")
+            for param_name, value in best_params.items():
+                print(f"  {param_name}: {value}")
 
-        # Spark Connect keeps fitted models in session-side cache; release Python references
-        # aggressively to reduce cache growth when fitting many models in one session.
-        del pred
-        del tsv_model
-        gc.collect()
+            pred = tsv_model.bestModel.transform(test_df)
+            metrics = evaluate_predictions(pred, TARGET_COL)
+            model_path = build_storage_path(model_root_path, station_id, TARGET_COL, estimator__name)
+            save_best_model(tsv_model.bestModel, model_path)
+            res = {
+                "run_id": run_id,
+                "run_ts": run_ts,
+                "station_id": station_id,
+                "target_col": TARGET_COL,
+                "model_name": estimator__name,
+                "model_path": model_path,
+                "rmse": metrics["rmse"],
+                "mae": metrics["mae"],
+                "cv_mae": best_mae,
+                "best_params": best_params,
+            }
+            results.append(res)
+        finally:
+            # Spark Connect keeps fitted models in session-side cache; release references
+            # aggressively to reduce cache growth when fitting many models in one session.
+            del pred
+            del tsv_model
+            del tsv_est
+            del estimator
+            del model
+            del paramGrid
+            del best_param_map
+            del best_params
+            gc.collect()
 
     return results
 
@@ -402,6 +414,7 @@ def main(sparkml_temp_dfs_path: str | None = None):
 
     print(f"Run ID: {run_id}")
     print(f"Run TS (UTC): {run_ts}")
+    print(f"Stage 07 CV folds: {os.environ.get('STAGE7_CV_NUM_FOLDS', '3')}")
 
     NUMERIC_COLS, CATEGORICAL_COLS, BOOLEAN_COLS, TIME_COL, _ = get_columns()
     summary_rows = []
