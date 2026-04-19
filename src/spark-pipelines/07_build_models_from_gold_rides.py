@@ -1,4 +1,5 @@
 
+import argparse
 
 import pyspark
 from pyspark.sql import SparkSession
@@ -373,7 +374,15 @@ def prune_feature_columns_with_random_forest(
 
 
 
-def main():
+def main(sparkml_temp_dfs_path: str | None = None):
+    if sparkml_temp_dfs_path:
+        os.environ["SPARKML_TEMP_DFS_PATH"] = sparkml_temp_dfs_path
+    elif os.environ.get("DATABRICKS_RUNTIME_VERSION") and not os.environ.get("SPARKML_TEMP_DFS_PATH"):
+        raise ValueError(
+            "SPARKML_TEMP_DFS_PATH is required on Databricks shared/serverless clusters. "
+            "Pass --sparkml-temp-dfs-path /Volumes/... or set the environment variable."
+        )
+
     spark = get_spark()
     apply_local_spark_defaults(spark)
     
@@ -458,4 +467,11 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="Stage 07 build models from gold rides")
+    parser.add_argument(
+        "--sparkml-temp-dfs-path",
+        default=os.environ.get("SPARKML_TEMP_DFS_PATH"),
+        help="UC volume path used by Spark ML caching on shared/serverless Databricks clusters",
+    )
+    args = parser.parse_args()
+    main(sparkml_temp_dfs_path=args.sparkml_temp_dfs_path)
