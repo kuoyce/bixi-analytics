@@ -42,6 +42,7 @@ from sparkutils import tsCrossValidator
 import datetime
 
 HARD_CODED_STATION_IDS: list[str] = ['STN_0001', 'STN_0002', 'STN_0003', 'STN_0004', 'STN_0005', 'STN_0006']
+DEFAULT_SPARKML_TEMP_DFS_PATH = "/Volumes/workspace/bixi-fs/tmp/sparkml"
 
 def load_gold_inputs(spark, base_path: str) -> tuple[DataFrame, DataFrame]:
     flow_df = spark.read.parquet(f"{base_path}/gold/station_flow")
@@ -168,16 +169,12 @@ def save_best_model(best_model, model_path: str) -> None:
 
 
 def clear_spark_caches_safe(spark) -> None:
-    try:
-        spark.catalog.clearCache()
-    except Exception as exc:
-        print(f"Info: unable to clear Spark catalog cache ({exc})")
+    if os.environ.get("DATABRICKS_RUNTIME_VERSION"):
+        print("Info: skipping Spark cache clear on Databricks runtime")
+        return
 
-    try:
-        spark.sql("CLEAR CACHE")
-    except Exception:
-        # Some runtimes may not support SQL cache management calls consistently.
-        pass
+    spark.catalog.clearCache()
+    spark.sql("CLEAR CACHE")
 
 
 def persist_df_best_effort(
@@ -240,6 +237,16 @@ def generate_run_metadata() -> tuple[str, str]:
         fallback_envs=("STAGE7_RUN_ID",),
         require_run_id_in_production=False,
     )
+
+
+def resolve_sparkml_temp_dfs_path(cli_value: str | None) -> str | None:
+    if cli_value and cli_value.strip():
+        return cli_value.strip()
+
+    if os.environ.get("DATABRICKS_RUNTIME_VERSION"):
+        return os.environ.get("SPARKML_TEMP_DFS_PATH", DEFAULT_SPARKML_TEMP_DFS_PATH)
+
+    return os.environ.get("SPARKML_TEMP_DFS_PATH")
 
 def get_baseline_models(TARGET_COL):
     return {
@@ -431,13 +438,9 @@ def prune_feature_columns_with_random_forest(
 
 
 def main(sparkml_temp_dfs_path: str | None = None):
-    if sparkml_temp_dfs_path:
-        os.environ["SPARKML_TEMP_DFS_PATH"] = sparkml_temp_dfs_path
-    elif os.environ.get("DATABRICKS_RUNTIME_VERSION") and not os.environ.get("SPARKML_TEMP_DFS_PATH"):
-        raise ValueError(
-            "SPARKML_TEMP_DFS_PATH is required on Databricks shared/serverless clusters. "
-            "Pass --sparkml-temp-dfs-path /Volumes/... or set the environment variable."
-        )
+    resolved_sparkml_temp_dfs_path = resolve_sparkml_temp_dfs_path(sparkml_temp_dfs_path)
+    if resolved_sparkml_temp_dfs_path:
+        os.environ["SPARKML_TEMP_DFS_PATH"] = resolved_sparkml_temp_dfs_path
 
     spark = get_spark()
     apply_local_spark_defaults(spark)
@@ -577,7 +580,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Stage 07 build models from gold rides")
     parser.add_argument(
         "--sparkml-temp-dfs-path",
-        default=os.environ.get("SPARKML_TEMP_DFS_PATH"),
+        default=os.environ.get(
+            "SPARKML_TEMP_DFS_PATH",
+            DEFAULT_SPARKML_TEMP_DFS_PATH if os.environ.get("DATABRICKS_RUNTIME_VERSION") else None,
+        ),
         help="UC volume path used by Spark ML caching on shared/serverless Databricks clusters",
     )
     args = parser.parse_args()
