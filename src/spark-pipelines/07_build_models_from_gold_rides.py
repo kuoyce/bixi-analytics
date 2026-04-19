@@ -43,6 +43,8 @@ import datetime
 
 HARD_CODED_STATION_IDS: list[str] = ['STN_0001', 'STN_0002', 'STN_0003', 'STN_0004', 'STN_0005', 'STN_0006']
 DEFAULT_SPARKML_TEMP_DFS_PATH = "/Volumes/workspace/bixi-fs/tmp/sparkml"
+ALLOWED_TARGET_COLS: set[str] = {"station_inflow", "station_outflow"}
+DEFAULT_TARGET_COL = "station_inflow"
 
 def load_gold_inputs(spark, base_path: str) -> tuple[DataFrame, DataFrame]:
     flow_df = spark.read.parquet(f"{base_path}/gold/station_flow")
@@ -54,6 +56,19 @@ def parse_station_ids(raw_value: str | None) -> list[str]:
     if not raw_value:
         return []
     return sorted({token.strip() for token in raw_value.split(",") if token.strip()})
+
+
+def resolve_target_col(raw_value: str | None) -> str:
+    target_col = (raw_value or "").strip()
+    if not target_col:
+        return DEFAULT_TARGET_COL
+
+    if target_col not in ALLOWED_TARGET_COLS:
+        raise ValueError(
+            f"Invalid PIPELINE_TARGET_COL={target_col}. Expected one of {sorted(ALLOWED_TARGET_COLS)}"
+        )
+
+    return target_col
 
 
 def resolve_target_station_ids(stations_df: DataFrame) -> list[str]:
@@ -86,6 +101,16 @@ def resolve_target_station_ids(stations_df: DataFrame) -> list[str]:
 
     print(f"Resolved {len(requested_station_ids)} target station(s) from {source}")
     return requested_station_ids
+
+
+def resolve_single_target_station_id(stations_df: DataFrame) -> str:
+    station_ids = resolve_target_station_ids(stations_df)
+    if len(station_ids) != 1:
+        raise ValueError(
+            "Stage 07 runs one station per invocation. "
+            "Provide exactly one station via PIPELINE_STATION_ID/--pipeline-station-id."
+        )
+    return station_ids[0]
 
 def get_columns(target_col: str = 'station_inflow') -> tuple[list[str], list[str], list[str], str, str]:
     ALL_COLUMNS = ['ts_hour', 'station_inflow', 'station_outflow', 'station_netflow', 'radius100m_inflow_lag1', 'radius100m_outflow_lag1', 'radius100m_inflow_lag12', 'radius100m_outflow_lag12', 'radius100m_inflow_rollmean6', 'radius100m_outflow_rollmean6', 'radius100m_inflow_rollmean12', 'radius100m_outflow_rollmean12', 'radius100m_inflow_rollsum6', 'radius100m_outflow_rollsum6', 'radius100m_inflow_rollsum12', 'radius100m_outflow_rollsum12', 'radius200m_inflow_lag1', 'radius200m_outflow_lag1', 'radius200m_inflow_lag12', 'radius200m_outflow_lag12', 'radius200m_inflow_rollmean6', 'radius200m_outflow_rollmean6', 'radius200m_inflow_rollmean12', 'radius200m_outflow_rollmean12', 'radius200m_inflow_rollsum6', 'radius200m_outflow_rollsum6', 'radius200m_inflow_rollsum12', 'radius200m_outflow_rollsum12', 'radius500m_inflow_lag1', 'radius500m_outflow_lag1', 'radius500m_inflow_lag12', 'radius500m_outflow_lag12', 'radius500m_inflow_rollmean6', 'radius500m_outflow_rollmean6', 'radius500m_inflow_rollmean12', 'radius500m_outflow_rollmean12', 'radius500m_inflow_rollsum6', 'radius500m_outflow_rollsum6', 'radius500m_inflow_rollsum12', 'radius500m_outflow_rollsum12', 'temp', 'precip', 'station_inflow_lag1', 'station_outflow_lag1', 'station_inflow_lag12', 'station_outflow_lag12', 'precip_rollmean3', 'station_inflow_rollmean6', 'station_outflow_rollmean6', 'station_inflow_rollmean12', 'station_outflow_rollmean12', 'precip_rollsum3', 'station_inflow_rollsum6', 'station_outflow_rollsum6', 'station_inflow_rollsum12', 'station_outflow_rollsum12', 'temp_bin', 'dow', 'is_weekday', 'hod', 'moy', 'dow_cos', 'hod_cos', 'moy_cos']
@@ -192,11 +217,33 @@ def persist_df_best_effort(
     return persisted_df, True
 
 
+def is_missing_summary_path_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return (
+        "path does not exist" in message
+        or "path_not_found" in message
+        or "no such file or directory" in message
+    )
+
+
 def write_summary_rows(spark, summary_rows: list[dict], summary_path: str, run_id: str) -> str | None:
     if not summary_rows:
         return None
 
-    summary_df = spark.createDataFrame(summary_rows)
+    incoming_summary_df = spark.createDataFrame(summary_rows)
+    summary_df = incoming_summary_df
+    dedupe_cols = ["run_id", "station_id", "target_col", "model_name", "model_path", "best_params_json"]
+    try:
+        existing_summary_df = spark.read.parquet(summary_path)
+        summary_df = (
+            existing_summary_df
+            .unionByName(incoming_summary_df, allowMissingColumns=True)
+            .dropDuplicates(dedupe_cols)
+        )
+    except Exception as exc:
+        if not is_missing_summary_path_error(exc):
+            raise
+
     summary_df, summary_df_cached = persist_df_best_effort(
         summary_df,
         StorageLevel.MEMORY_AND_DISK,
@@ -207,19 +254,27 @@ def write_summary_rows(spark, summary_rows: list[dict], summary_path: str, run_i
 
     table_name = None
     if should_write_summary_tables():
-        catalog, schema, table, _ = resolve_summary_table_target(
+        catalog, schema, table, full_table_name = resolve_summary_table_target(
             default_table="solo",
             env_key="PIPELINE_TABLE_SOLO",
         )
-        table_name = append_run_df_to_delta_table(
-            spark=spark,
-            df=summary_df,
-            catalog=catalog,
-            schema=schema,
-            table=table,
-            run_id=run_id,
-            run_id_col="run_id",
-        )
+        try:
+            table_name = append_run_df_to_delta_table(
+                spark=spark,
+                df=summary_df,
+                catalog=catalog,
+                schema=schema,
+                table=table,
+                run_id=run_id,
+                run_id_col="run_id",
+            )
+        except ValueError as exc:
+            if "Duplicate run id detected" not in str(exc):
+                raise
+            run_id_sql = str(run_id).replace("'", "''")
+            spark.sql(f"DELETE FROM {full_table_name} WHERE run_id = '{run_id_sql}'")
+            summary_df.write.format("delta").mode("append").saveAsTable(full_table_name)
+            table_name = full_table_name
 
     if summary_df_cached:
         summary_df.unpersist(blocking=True)
@@ -443,7 +498,7 @@ def prune_feature_columns_with_random_forest(
 
 
 
-def main(sparkml_temp_dfs_path: str | None = None):
+def main(target_col: str, sparkml_temp_dfs_path: str | None = None):
 
     spark = get_spark()
     apply_local_spark_defaults(spark)
@@ -456,119 +511,120 @@ def main(sparkml_temp_dfs_path: str | None = None):
     run_id, run_ts = generate_run_metadata()
     model_root_path = build_storage_path(base_path, "models", run_id)
     flow_df, stations_df = load_gold_inputs(spark, base_path)
-    station_ids = resolve_target_station_ids(stations_df)
+    station_id = resolve_single_target_station_id(stations_df)
+    target_col = resolve_target_col(target_col)
 
     print(f"Run ID: {run_id}")
     print(f"Run TS (UTC): {run_ts}")
     print(f"Stage 07 CV folds: {os.environ.get('STAGE7_CV_NUM_FOLDS', '3')}")
+    print(f"Stage 07 station id: {station_id}")
+    print(f"Stage 07 target col: {target_col}")
 
-    NUMERIC_COLS, CATEGORICAL_COLS, BOOLEAN_COLS, TIME_COL, _ = get_columns()
+    NUMERIC_COLS, CATEGORICAL_COLS, BOOLEAN_COLS, TIME_COL, TARGET_COL = get_columns(target_col=target_col)
     summary_rows = []
 
-    for idx, station_id in enumerate(station_ids, start=1):
-        print(f"[{idx}/{len(station_ids)}] Building model for station: {station_id}")
-        for TARGET_COL in ['station_inflow', 'station_outflow']:
-            station_flow_df = None
-            station_df = None
-            train_df = None
-            test_df = None
-            fit_train_df = None
-            fit_test_df = None
-            fit_train_cached = False
-            fit_test_cached = False
-            importance_df = None
-            results = None
+    print(f"Building model for station: {station_id} target: {TARGET_COL}")
+    station_flow_df = None
+    station_df = None
+    train_df = None
+    test_df = None
+    fit_train_df = None
+    fit_test_df = None
+    fit_train_cached = False
+    fit_test_cached = False
+    importance_df = None
+    results = None
 
+    try:
+        # Filter the flow DataFrame for the specific station.
+        station_flow_df = flow_df.filter(F.col("station_id") == station_id)
+        station_df = fillna_numerics_and_booleans(station_flow_df, NUMERIC_COLS, BOOLEAN_COLS)
+        train_df, test_df = split_train_test_by_cutoff(station_df)
+
+        reduced_categorical_cols, reduced_numeric_cols, importance_df = prune_feature_columns_with_random_forest(
+            train_df=train_df,
+            target_col=TARGET_COL,
+            categorical_cols=CATEGORICAL_COLS,
+            numeric_cols=NUMERIC_COLS,
+        )
+
+        print(f"Building model for station {station_id} with {station_flow_df.count()} records")
+        print(
+            f"Pruned feature set for {TARGET_COL}: "
+            f"{len(reduced_numeric_cols)} numeric, {len(reduced_categorical_cols)} categorical"
+        )
+        print("Top 10 feature importances:")
+        print(importance_df.head(10))
+
+        # Narrow the fit/test inputs to only required columns to reduce executor-side footprint.
+        fit_columns = [TIME_COL, TARGET_COL] + reduced_categorical_cols + reduced_numeric_cols
+        fit_train_df, fit_train_cached = persist_df_best_effort(
+            train_df.select(*fit_columns),
+            StorageLevel.DISK_ONLY,
+            label=f"{station_id}/{TARGET_COL} train",
+        )
+        fit_test_df, fit_test_cached = persist_df_best_effort(
+            test_df.select(*fit_columns),
+            StorageLevel.DISK_ONLY,
+            label=f"{station_id}/{TARGET_COL} test",
+        )
+
+        results = build_model_for_station(
+            spark,
+            station_id,
+            run_id,
+            run_ts,
+            fit_train_df,
+            fit_test_df,
+            TARGET_COL=TARGET_COL,
+            CATEGORICAL_COLS=reduced_categorical_cols,
+            NUMERIC_COLS=reduced_numeric_cols,
+            model_root_path=model_root_path,
+        )
+        print(pd.DataFrame(results)[["model_name", "rmse", "mae"]].sort_values("rmse"))
+        summary_rows.extend(
+            [
+                {
+                    "run_id": row["run_id"],
+                    "run_ts": row["run_ts"],
+                    "station_id": row["station_id"],
+                    "target_col": row["target_col"],
+                    "model_name": row["model_name"],
+                    "model_path": row["model_path"],
+                    "rmse": row["rmse"],
+                    "mae": row["mae"],
+                    "cv_mae": row["cv_mae"],
+                    "best_params_json": json.dumps(row["best_params"], default=str),
+                }
+                for row in results
+            ]
+        )
+    finally:
+        if fit_train_cached and fit_train_df is not None:
             try:
-                # Filter the flow DataFrame for the specific station.
-                station_flow_df = flow_df.filter(F.col("station_id") == station_id)
-                station_df = fillna_numerics_and_booleans(station_flow_df, NUMERIC_COLS, BOOLEAN_COLS)
-                train_df, test_df = split_train_test_by_cutoff(station_df)
-
-                reduced_categorical_cols, reduced_numeric_cols, importance_df = prune_feature_columns_with_random_forest(
-                    train_df=train_df,
-                    target_col=TARGET_COL,
-                    categorical_cols=CATEGORICAL_COLS,
-                    numeric_cols=NUMERIC_COLS,
-                )
-
-                print(f"Building model for station {station_id} with {station_flow_df.count()} records")
-                print(
-                    f"Pruned feature set for {TARGET_COL}: "
-                    f"{len(reduced_numeric_cols)} numeric, {len(reduced_categorical_cols)} categorical"
-                )
-                print("Top 10 feature importances:")
-                print(importance_df.head(10))
-
-                # Narrow the fit/test inputs to only required columns to reduce executor-side footprint.
-                fit_columns = [TIME_COL, TARGET_COL] + reduced_categorical_cols + reduced_numeric_cols
-                fit_train_df, fit_train_cached = persist_df_best_effort(
-                    train_df.select(*fit_columns),
-                    StorageLevel.DISK_ONLY,
-                    label=f"{station_id}/{TARGET_COL} train",
-                )
-                fit_test_df, fit_test_cached = persist_df_best_effort(
-                    test_df.select(*fit_columns),
-                    StorageLevel.DISK_ONLY,
-                    label=f"{station_id}/{TARGET_COL} test",
-                )
-
-                results = build_model_for_station(
-                    spark,
-                    station_id,
-                    run_id,
-                    run_ts,
-                    fit_train_df,
-                    fit_test_df,
-                    TARGET_COL=TARGET_COL,
-                    CATEGORICAL_COLS=reduced_categorical_cols,
-                    NUMERIC_COLS=reduced_numeric_cols,
-                    model_root_path=model_root_path,
-                )
-                print(pd.DataFrame(results)[["model_name", "rmse", "mae"]].sort_values("rmse"))
-                summary_rows.extend(
-                    [
-                        {
-                            "run_id": row["run_id"],
-                            "run_ts": row["run_ts"],
-                            "station_id": row["station_id"],
-                            "target_col": row["target_col"],
-                            "model_name": row["model_name"],
-                            "model_path": row["model_path"],
-                            "rmse": row["rmse"],
-                            "mae": row["mae"],
-                            "cv_mae": row["cv_mae"],
-                            "best_params_json": json.dumps(row["best_params"], default=str),
-                        }
-                        for row in results
-                    ]
-                )
-            finally:
-                if fit_train_cached and fit_train_df is not None:
-                    try:
-                        fit_train_df.unpersist(blocking=True)
-                    except Exception:
-                        pass
-                if fit_test_cached and fit_test_df is not None:
-                    try:
-                        fit_test_df.unpersist(blocking=True)
-                    except Exception:
-                        pass
-                clear_spark_caches_safe(spark)
-                del station_flow_df
-                del station_df
-                del train_df
-                del test_df
-                del fit_train_df
-                del fit_test_df
-                del fit_train_cached
-                del fit_test_cached
-                del importance_df
-                del results
-                gc.collect()
-
+                fit_train_df.unpersist(blocking=True)
+            except Exception:
+                pass
+        if fit_test_cached and fit_test_df is not None:
+            try:
+                fit_test_df.unpersist(blocking=True)
+            except Exception:
+                pass
         clear_spark_caches_safe(spark)
+        del station_flow_df
+        del station_df
+        del train_df
+        del test_df
+        del fit_train_df
+        del fit_test_df
+        del fit_train_cached
+        del fit_test_cached
+        del importance_df
+        del results
         gc.collect()
+
+    clear_spark_caches_safe(spark)
+    gc.collect()
 
     solo_summary_path = build_storage_path(base_path, "models", "summary", "solo", run_id)
     solo_table_name = write_summary_rows(
@@ -586,9 +642,15 @@ def main(sparkml_temp_dfs_path: str | None = None):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Stage 07 build models from gold rides")
     parser.add_argument(
+        "--pipeline-target-col",
+        default=os.environ.get("PIPELINE_TARGET_COL", DEFAULT_TARGET_COL),
+        choices=sorted(ALLOWED_TARGET_COLS),
+        help="Single target column to train (maps to PIPELINE_TARGET_COL)",
+    )
+    parser.add_argument(
         "--pipeline-station-id",
         default=os.environ.get("PIPELINE_STATION_ID"),
-        help="Comma-separated station IDs to train (maps to PIPELINE_STATION_ID)",
+        help="Single station ID to train for this invocation (maps to PIPELINE_STATION_ID)",
     )
     parser.add_argument(
         "--stage7-cv-num-folds",
@@ -650,6 +712,7 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
+    _set_env_if_provided("PIPELINE_TARGET_COL", args.pipeline_target_col)
     _set_env_if_provided("PIPELINE_STATION_ID", args.pipeline_station_id)
     _set_env_if_provided("STAGE7_CV_NUM_FOLDS", args.stage7_cv_num_folds)
     _set_env_if_provided("PIPELINE_RUN_ID", args.pipeline_run_id)
@@ -662,4 +725,7 @@ if __name__ == "__main__":
     _set_env_if_provided("PIPELINE_TABLE_SCHEMA", args.pipeline_table_schema)
     _set_env_if_provided("PIPELINE_TABLE_SOLO", args.pipeline_table_solo)
 
-    main(sparkml_temp_dfs_path=args.sparkml_temp_dfs_path)
+    main(
+        target_col=args.pipeline_target_col,
+        sparkml_temp_dfs_path=args.sparkml_temp_dfs_path,
+    )
