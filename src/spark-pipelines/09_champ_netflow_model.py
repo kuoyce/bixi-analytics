@@ -42,10 +42,32 @@ def is_missing_summary_path_error(exc: Exception) -> bool:
     )
 
 
+def is_empty_parquet_schema_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return (
+        "unable_to_infer_schema" in message
+        or "unable to infer schema for parquet" in message
+    )
+
+
 def build_storage_path(base_path: str, *parts: str) -> str:
     base = base_path.rstrip("/")
     suffix = "/".join(str(p).strip("/") for p in parts)
     return f"{base}/{suffix}" if suffix else base
+
+
+def has_parquet_data_files(path: str) -> bool:
+    if not os.path.isdir(path):
+        return False
+
+    for name in os.listdir(path):
+        # Ignore Spark marker files and local checksum sidecars.
+        if name.startswith(".") or name.startswith("_"):
+            continue
+        if name.endswith(".parquet"):
+            return True
+
+    return False
 
 
 def list_summary_run_paths(summary_root_path: str) -> list[str]:
@@ -73,6 +95,16 @@ def load_combi_summary_history(spark, base_path: str, exclude_run_id: str | None
 
 def load_current_champion(spark, base_path: str) -> DataFrame | None:
     champion_path = build_storage_path(base_path, "models", "summary", "champion", "current")
+
+    # A pre-existing but data-empty directory is a distinct failure mode from
+    # a missing path; fail fast with an explicit root-cause error.
+    if os.path.isdir(champion_path) and not has_parquet_data_files(champion_path):
+        raise RuntimeError(
+            "Champion snapshot path exists but has no parquet data files: "
+            f"{champion_path}. This usually means a prior overwrite left an empty "
+            "directory (for example an interrupted write or zero-row snapshot)."
+        )
+
     try:
         champion_df = spark.read.parquet(champion_path)
         # Spark reads are lazy; force tiny action so missing paths fail inside this try block.
@@ -80,6 +112,12 @@ def load_current_champion(spark, base_path: str) -> DataFrame | None:
         return champion_df
     except Exception as exc:
         if not is_missing_summary_path_error(exc):
+            if is_empty_parquet_schema_error(exc):
+                raise RuntimeError(
+                    "Champion snapshot parquet schema inference failed at "
+                    f"{champion_path}. The directory exists but appears to have no "
+                    "readable parquet data files."
+                ) from exc
             raise
         return None
 
@@ -229,6 +267,16 @@ def save_current_champion_if_enabled(
         spark = champion_current_df.sparkSession
         current_rows = champion_current_df.collect()
         history_rows = champion_history_df.collect()
+        if not current_rows:
+            raise ValueError(
+                "Refusing to overwrite champion/current with zero rows. "
+                "Inspect stage 08/09 inputs before persisting champion snapshot."
+            )
+        if not history_rows:
+            raise ValueError(
+                "Refusing to overwrite champion/history with zero rows. "
+                "Inspect stage 08/09 inputs before persisting champion snapshot."
+            )
         current_df = spark.createDataFrame(current_rows, schema=champion_current_df.schema)
         history_df = spark.createDataFrame(history_rows, schema=champion_history_df.schema)
         current_df.write.mode("overwrite").parquet(champion_current_path)

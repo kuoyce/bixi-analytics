@@ -46,6 +46,12 @@ OPENMETEO_FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
 STN_0001_SAMPLE_REQUEST_JSON = (
     '{"name":"du Mont-Royal / Clark","lat":45.51941,"lon":-73.58685,"station_id":"218"}'
 )
+STN_0003_SAMPLE_REQUEST_JSON = (
+    '{"name":"des Pins / St-Laurent","lat":45.51522812881499,"lon":-73.5750961303711,"station_id":"209"}'
+)
+STN_0004_SAMPLE_REQUEST_JSON = (
+    '{"name":"Laurier / St-Denis","lat":45.5271540234837,"lon":-73.58943924307823,"station_id":"558"}'
+)
 MONTREAL_TZ = ZoneInfo("America/Montreal")
 MODEL_INPUT_CATEGORICAL_COLUMNS = ["temp_bin"]
 MODEL_INPUT_BOOLEAN_COLUMNS = ["is_weekday"]
