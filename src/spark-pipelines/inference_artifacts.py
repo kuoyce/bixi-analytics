@@ -783,17 +783,24 @@ def load_observed_station_flow_history(
     request_ts_utc: datetime.datetime,
     lookback_hours: int,
     warmup_hours: int,
+    history_year_offset_days: int = 0,
 ) -> dict[datetime.datetime, tuple[float, float]]:
     request_ts_utc = to_utc_hour(request_ts_utc)
     start_ts_utc = request_ts_utc - timedelta(hours=lookback_hours + warmup_hours)
 
-    prior_year_offset = timedelta(days=365)
-    request_ts_utc = request_ts_utc - prior_year_offset
-    start_ts_utc = start_ts_utc - prior_year_offset
+    offset_days = int(history_year_offset_days)
+    if offset_days < 0:
+        raise ValueError(
+            f"history_year_offset_days must be >= 0, got: {history_year_offset_days}"
+        )
+    history_year_offset = timedelta(days=offset_days)
+
+    query_request_ts_utc = request_ts_utc - history_year_offset
+    query_start_ts_utc = start_ts_utc - history_year_offset
 
     safe_station_id = canonical_station_id.replace("'", "\\'")
-    start_text = start_ts_utc.strftime("%Y-%m-%d %H:%M:%S")
-    end_text = request_ts_utc.strftime("%Y-%m-%d %H:%M:%S")
+    start_text = query_start_ts_utc.strftime("%Y-%m-%d %H:%M:%S")
+    end_text = query_request_ts_utc.strftime("%Y-%m-%d %H:%M:%S")
 
     flow_path = f"{base_path}/gold/station_flow"
     try:
@@ -817,7 +824,7 @@ def load_observed_station_flow_history(
         ts_raw = row["ts_hour"]
         if ts_raw is None:
             continue
-        ts_utc = to_utc_hour(ts_raw) + prior_year_offset
+        ts_utc = to_utc_hour(ts_raw) + history_year_offset
         inflow = float(row["station_inflow"] or 0.0)
         outflow = float(row["station_outflow"] or 0.0)
         observed_by_ts[ts_utc] = (inflow, outflow)
@@ -987,6 +994,7 @@ def synthesize_station_history(
     lookback_hours: int = 168,
     requested_mode: str = "auto",
     warmup_hours: int = 336,
+    history_year_offset_days: int = 0,
 ) -> SyntheticHistoryResult:
     request_ts_utc = to_utc_hour(request_ts_utc)
     window_start_ts = request_ts_utc - timedelta(hours=lookback_hours)
@@ -1002,6 +1010,7 @@ def synthesize_station_history(
         request_ts_utc=request_ts_utc,
         lookback_hours=lookback_hours,
         warmup_hours=warmup_hours,
+        history_year_offset_days=history_year_offset_days,
     )
 
     missing_before_fill = sum(

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 
 from inference_artifacts import (
     build_spark_session,
@@ -29,6 +30,7 @@ def run_history_step(
     lookback_hours: int,
     warmup_hours: int,
     synthesis_mode: str,
+    history_year_offset_days: int,
 ) -> tuple[dict, str]:
     base_path = get_base_path()
 
@@ -52,6 +54,7 @@ def run_history_step(
             lookback_hours=lookback_hours,
             requested_mode=synthesis_mode,
             warmup_hours=warmup_hours,
+            history_year_offset_days=history_year_offset_days,
         )
     finally:
         spark.stop()
@@ -65,6 +68,7 @@ def run_history_step(
         "mode_requested": history_result.mode_requested,
         "mode_used": history_result.mode_used,
         "lookback_hours": history_result.lookback_hours,
+        "history_year_offset_days": history_year_offset_days,
         "window_start": history_result.window_start,
         "window_end": history_result.window_end,
         "missing_before_fill": history_result.missing_before_fill,
@@ -89,6 +93,12 @@ def main() -> None:
     parser.add_argument("--lookback-hours", type=int, default=None)
     parser.add_argument("--warmup-hours", type=int, default=None)
     parser.add_argument("--synthesis-mode", default=None)
+    parser.add_argument(
+        "--history-year-offset-days",
+        type=int,
+        default=None,
+        help="Shift history lookup window backward by N days (default: 365 for previous-year retrieval).",
+    )
     args = parser.parse_args()
 
     run_id, run_ts = resolve_inference_run_context(args.run_id, args.run_ts)
@@ -105,12 +115,32 @@ def main() -> None:
         default="auto",
     )
 
+    if args.history_year_offset_days is not None:
+        history_year_offset_days = int(args.history_year_offset_days)
+    else:
+        raw_offset = os.environ.get("INFERENCE_HISTORY_YEAR_OFFSET_DAYS")
+        if raw_offset is None or not raw_offset.strip():
+            history_year_offset_days = 365
+        else:
+            try:
+                history_year_offset_days = int(raw_offset)
+            except ValueError as exc:
+                raise ValueError(
+                    f"INFERENCE_HISTORY_YEAR_OFFSET_DAYS must be an integer, got: {raw_offset!r}"
+                ) from exc
+
+    if history_year_offset_days < 0:
+        raise ValueError(
+            f"history-year-offset-days must be >= 0, got: {history_year_offset_days}"
+        )
+
     payload, artifact_path = run_history_step(
         run_id=run_id,
         run_ts=run_ts,
         lookback_hours=lookback_hours,
         warmup_hours=warmup_hours,
         synthesis_mode=synthesis_mode,
+        history_year_offset_days=history_year_offset_days,
     )
 
     print(
@@ -122,6 +152,7 @@ def main() -> None:
                 "artifact_path": artifact_path,
                 "row_count": len(payload["rows"]),
                 "mode_used": payload["mode_used"],
+                "history_year_offset_days": history_year_offset_days,
             },
             indent=2,
         )

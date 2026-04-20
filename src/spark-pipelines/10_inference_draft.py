@@ -15,6 +15,7 @@ The final returned payload contains only the required output columns.
 from __future__ import annotations
 
 import json
+import os
 
 from inference_artifacts import (
     parse_positive_int_env,
@@ -35,6 +36,7 @@ def run_inference_pipeline(
     history_lookback_hours: int = 168,
     history_warmup_hours: int = 336,
     history_synthesis_mode: str = "auto",
+    history_year_offset_days: int = 365,
     historical_return_steps: int = 6,
 ) -> tuple[dict, str]:
     resolved_run_id, resolved_run_ts = resolve_inference_run_context(run_id, run_ts)
@@ -54,6 +56,7 @@ def run_inference_pipeline(
         lookback_hours=history_lookback_hours,
         warmup_hours=history_warmup_hours,
         synthesis_mode=history_synthesis_mode,
+        history_year_offset_days=history_year_offset_days,
     )
     run_feature_rows_step(
         run_id=resolved_run_id,
@@ -81,6 +84,21 @@ def main() -> None:
         env_key="INFERENCE_SYNTHESIS_MODE",
         default="auto",
     )
+    raw_history_year_offset = os.environ.get("INFERENCE_HISTORY_YEAR_OFFSET_DAYS")
+    if raw_history_year_offset is None or not raw_history_year_offset.strip():
+        history_year_offset_days = 365
+    else:
+        try:
+            history_year_offset_days = int(raw_history_year_offset)
+        except ValueError as exc:
+            raise ValueError(
+                f"INFERENCE_HISTORY_YEAR_OFFSET_DAYS must be an integer, got: {raw_history_year_offset!r}"
+            ) from exc
+    if history_year_offset_days < 0:
+        raise ValueError(
+            f"INFERENCE_HISTORY_YEAR_OFFSET_DAYS must be >= 0, got: {history_year_offset_days}"
+        )
+
     historical_return_steps = parse_positive_int_env(
         "HISTORICAL_RETURN_STEPS",
         default=6,
@@ -91,6 +109,7 @@ def main() -> None:
         history_lookback_hours=history_lookback_hours,
         history_warmup_hours=history_warmup_hours,
         history_synthesis_mode=history_synthesis_mode,
+        history_year_offset_days=history_year_offset_days,
         historical_return_steps=historical_return_steps,
     )
 
