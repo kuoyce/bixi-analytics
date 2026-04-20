@@ -16,7 +16,7 @@ Stage-10 is now split into these scripts under `src/spark-pipelines/`:
      - final transformed stage-06 gold columns
      - stage-07 model input column groups
    - Saves feature artifacts under run-scoped inference subdirectories (not gold).
-5. `inference_step05_inference.py`
+5. `inference_step_05_inference.py`
    - Reads all prior step artifacts and writes final output payload.
    - Runs Milestone-6 champion scoring using:
      - champion model paths from `live_station/live_station.json`
@@ -99,7 +99,7 @@ Implemented items should stay listed here (do not remove), while remaining work 
 3. Implemented step 01 (`inference_step_01_live_station.py`) for live station + canonical + champion validation.
 4. Implemented step 02 (`inference_step_02_weather.py`) for weather horizon retrieval with partial-gap fill behavior.
 5. Implemented step 03 (`inference_step_03_history.py`) for one-week synthetic history generation (`iterative|fallback|auto`).
-6. Implemented step 05 (`inference_step05_inference.py`) to read prior step artifacts by `run_id` and emit final output.
+6. Implemented step 05 (`inference_step_05_inference.py`) to read prior step artifacts by `run_id` and emit final output.
 7. Implemented `run_10_inference_pipeline.py` to propagate shared `run_id` and `run_ts` across stage-10 steps.
 8. Refactored `10_inference_draft.py` into a thin in-process orchestrator that runs the same step flow.
 9. Constrained final payload schema to exactly these 8 fields: `request_timestamp`, `station_id`, `capacity`, `num_bikes_available`, `num_docks_available`, `canonical_station_id`, `model_inflow`, and `model_outflow`.
@@ -108,7 +108,7 @@ Implemented items should stay listed here (do not remove), while remaining work 
    - Checks full transformed column coverage against stage-06 gold schema.
    - Checks model input coverage against stage-07 model input column groups.
    - Writes artifacts to `models/inference/run_*/feature_rows/...` instead of gold.
-11. Implemented Milestone 6 scoring in `inference_step05_inference.py`:
+11. Implemented Milestone 6 scoring in `inference_step_05_inference.py`:
    - Loads champion inflow/outflow pipeline model paths from `live_station/live_station.json`.
    - Loads horizon model input rows from `feature_rows/model_input/`.
    - Produces non-negative prediction arrays for `model_inflow` and `model_outflow`.

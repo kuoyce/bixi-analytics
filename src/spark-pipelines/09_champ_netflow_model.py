@@ -276,6 +276,13 @@ def main() -> None:
         run_id=run_id,
     )
 
+    # If champion/current was overwritten, read it back to avoid stale file
+    # references from pre-overwrite DataFrame lineage.
+    if champion_saved:
+        champion_display_df = spark.read.parquet(champion_current_path).orderBy(F.col("station_id").asc())
+    else:
+        champion_display_df = champion_df
+
     champion_history_table_name = None
     if should_write_summary_tables():
         catalog, schema, table, full_table_name = resolve_summary_table_target(
@@ -316,7 +323,7 @@ def main() -> None:
     if champion_history_table_name:
         print(f"Appended champion history table: {champion_history_table_name}")
 
-    champion_df.show(200, truncate=False)
+    champion_display_df.show(200, truncate=False)
     spark.stop()
 
 

@@ -60,7 +60,7 @@ def main() -> None:
         script_dir / "inference_step_02_weather.py",
         script_dir / "inference_step_03_history.py",
         script_dir / "inference_step_04_features.py",
-        script_dir / "inference_step05_inference.py",
+        script_dir / "inference_step_05_inference.py",
     ]
 
     for path in step_scripts:
