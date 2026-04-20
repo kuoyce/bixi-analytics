@@ -35,6 +35,7 @@ def run_inference_pipeline(
     history_lookback_hours: int = 168,
     history_warmup_hours: int = 336,
     history_synthesis_mode: str = "auto",
+    historical_return_steps: int = 6,
 ) -> tuple[dict, str]:
     resolved_run_id, resolved_run_ts = resolve_inference_run_context(run_id, run_ts)
 
@@ -61,6 +62,7 @@ def run_inference_pipeline(
     output_payload, output_path = run_output_step(
         run_id=resolved_run_id,
         run_ts=resolved_run_ts,
+        historical_return_steps=historical_return_steps,
     )
     return output_payload, output_path
 
@@ -79,12 +81,17 @@ def main() -> None:
         env_key="INFERENCE_SYNTHESIS_MODE",
         default="auto",
     )
+    historical_return_steps = parse_positive_int_env(
+        "HISTORICAL_RETURN_STEPS",
+        default=6,
+    )
 
     output_payload, _ = run_inference_pipeline(
         horizon_steps=horizon_steps,
         history_lookback_hours=history_lookback_hours,
         history_warmup_hours=history_warmup_hours,
         history_synthesis_mode=history_synthesis_mode,
+        historical_return_steps=historical_return_steps,
     )
 
     print(json.dumps(output_payload, indent=2))

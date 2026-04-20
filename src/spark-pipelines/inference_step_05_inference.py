@@ -12,6 +12,7 @@ Writes:
 
 Note:
 - Prediction arrays are produced by champion model scoring (Milestone 6).
+- Historical arrays are sourced from synthetic_history and controlled by HISTORICAL_RETURN_STEPS.
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ import json
 from inference_artifacts import (
     build_spark_session,
     get_base_path,
+    parse_positive_int_env,
     read_step_artifact,
     resolve_inference_run_context,
     score_champion_models_from_feature_rows,
@@ -29,7 +31,36 @@ from inference_artifacts import (
 )
 
 
-def run_output_step(run_id: str, run_ts: str) -> tuple[dict, str]:
+def _to_nonnegative_int(value: object) -> int:
+    if value is None:
+        return 0
+    try:
+        return max(0, int(round(float(value))))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _select_history_tail_rows(
+    synthetic_history_payload: dict,
+    historical_return_steps: int,
+) -> list[dict]:
+    rows = synthetic_history_payload.get("rows")
+    if not isinstance(rows, list) or not rows:
+        raise ValueError("synthetic_history artifact has no rows")
+
+    history_rows = [row for row in rows if isinstance(row, dict) and row.get("timestamp")]
+    if not history_rows:
+        raise ValueError("synthetic_history artifact rows are missing timestamp values")
+
+    history_rows.sort(key=lambda row: str(row["timestamp"]))
+    return history_rows[-historical_return_steps:]
+
+
+def run_output_step(
+    run_id: str,
+    run_ts: str,
+    historical_return_steps: int,
+) -> tuple[dict, str]:
     base_path = get_base_path()
 
     live_payload = read_step_artifact(
@@ -45,7 +76,7 @@ def run_output_step(run_id: str, run_ts: str) -> tuple[dict, str]:
         step_name="weather",
         filename="weather.json",
     )
-    read_step_artifact(
+    synthetic_history_payload = read_step_artifact(
         base_path=base_path,
         run_id=run_id,
         step_name="synthetic_history",
@@ -90,6 +121,29 @@ def run_output_step(run_id: str, run_ts: str) -> tuple[dict, str]:
             f"predictions={prediction_result['row_count']} expected={expected_row_count}"
         )
 
+    history_tail_rows = _select_history_tail_rows(
+        synthetic_history_payload=synthetic_history_payload,
+        historical_return_steps=historical_return_steps,
+    )
+    station_timestamps = [str(row["timestamp"]) for row in history_tail_rows]
+    station_inflow = [_to_nonnegative_int(row.get("station_inflow")) for row in history_tail_rows]
+    station_outflow = [_to_nonnegative_int(row.get("station_outflow")) for row in history_tail_rows]
+
+    model_timestamps = [str(ts) for ts in prediction_result.get("timestamps", [])]
+    model_inflow_int = [_to_nonnegative_int(value) for value in prediction_result["model_inflow"]]
+    model_outflow_int = [_to_nonnegative_int(value) for value in prediction_result["model_outflow"]]
+
+    if len(model_timestamps) != len(model_inflow_int) or len(model_timestamps) != len(model_outflow_int):
+        raise ValueError(
+            "Milestone 6 scoring timestamp/value length mismatch: "
+            f"timestamps={len(model_timestamps)} inflow={len(model_inflow_int)} "
+            f"outflow={len(model_outflow_int)}"
+        )
+
+    joined_timestamp = station_timestamps + model_timestamps
+    joined_inflow = station_inflow + model_inflow_int
+    joined_outflow = station_outflow + model_outflow_int
+
     live_station = live_payload["live_station"]
     station_id = str(live_station["station_id"])
 
@@ -100,8 +154,13 @@ def run_output_step(run_id: str, run_ts: str) -> tuple[dict, str]:
         "num_bikes_available": live_station["num_bikes_available"],
         "num_docks_available": live_station["num_docks_available"],
         "canonical_station_id": live_payload["canonical_station_id"],
+        "station_inflow": station_inflow,
+        "station_outflow": station_outflow,
         "model_inflow": prediction_result["model_inflow"],
         "model_outflow": prediction_result["model_outflow"],
+        "joined_timestamp": joined_timestamp,
+        "joined_inflow": joined_inflow,
+        "joined_outflow": joined_outflow,
     }
 
     artifact_path = write_step_artifact(
@@ -118,10 +177,29 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Inference Step 05: final inference output")
     parser.add_argument("--run-id", default=None)
     parser.add_argument("--run-ts", default=None)
+    parser.add_argument(
+        "--historical-return-steps",
+        type=int,
+        default=None,
+        help="Historical rows to include from synthetic_history. Defaults to HISTORICAL_RETURN_STEPS or 6.",
+    )
     args = parser.parse_args()
 
+    if args.historical_return_steps is not None and args.historical_return_steps <= 0:
+        raise ValueError("--historical-return-steps must be > 0")
+
+    historical_return_steps = (
+        args.historical_return_steps
+        if args.historical_return_steps is not None
+        else parse_positive_int_env("HISTORICAL_RETURN_STEPS", default=6)
+    )
+
     run_id, run_ts = resolve_inference_run_context(args.run_id, args.run_ts)
-    output_payload, artifact_path = run_output_step(run_id=run_id, run_ts=run_ts)
+    output_payload, artifact_path = run_output_step(
+        run_id=run_id,
+        run_ts=run_ts,
+        historical_return_steps=historical_return_steps,
+    )
 
     print(
         json.dumps(
@@ -129,6 +207,7 @@ def main() -> None:
                 "step": "output",
                 "run_id": run_id,
                 "run_ts": run_ts,
+                "historical_return_steps": historical_return_steps,
                 "artifact_path": artifact_path,
                 "output": output_payload,
             },

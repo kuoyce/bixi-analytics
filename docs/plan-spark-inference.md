@@ -70,6 +70,7 @@ Runtime controls:
 2. `INFERENCE_HISTORY_LOOKBACK_HOURS` (default `168`)
 3. `INFERENCE_HISTORY_WARMUP_HOURS` (default `336`)
 4. `INFERENCE_SYNTHESIS_MODE` (`auto|iterative|fallback`, default `auto`)
+5. `HISTORICAL_RETURN_STEPS` (default `6`)
 
 Compatibility fallback:
 1. `PIPELINE_STATION_ID` is accepted when `INFERENCE_STATION_ID` is not set.
@@ -84,8 +85,13 @@ The final output file contains only:
   "num_bikes_available": ...,
   "num_docks_available": ...,
   "canonical_station_id": ...,
-  "model_inflow": [],
-  "model_outflow": []
+   "station_inflow": [],
+   "station_outflow": [],
+   "model_inflow": [],
+   "model_outflow": [],
+   "joined_timestamp": [],
+   "joined_inflow": [],
+   "joined_outflow": []
 }
 ```
 
@@ -102,7 +108,10 @@ Implemented items should stay listed here (do not remove), while remaining work 
 6. Implemented step 05 (`inference_step_05_inference.py`) to read prior step artifacts by `run_id` and emit final output.
 7. Implemented `run_10_inference_pipeline.py` to propagate shared `run_id` and `run_ts` across stage-10 steps.
 8. Refactored `10_inference_draft.py` into a thin in-process orchestrator that runs the same step flow.
-9. Constrained final payload schema to exactly these 8 fields: `request_timestamp`, `station_id`, `capacity`, `num_bikes_available`, `num_docks_available`, `canonical_station_id`, `model_inflow`, and `model_outflow`.
+9. Expanded final payload schema to include both historical and forecast series:
+   - historical arrays: `station_inflow`, `station_outflow`
+   - forecast arrays: `model_inflow`, `model_outflow`
+   - joined arrays: `joined_timestamp`, `joined_inflow`, `joined_outflow`
 10. Implemented Milestone 5 feature-row generation in `inference_step_04_features.py`:
    - Builds stage-06-compatible horizon rows.
    - Checks full transformed column coverage against stage-06 gold schema.
@@ -117,6 +126,9 @@ Implemented items should stay listed here (do not remove), while remaining work 
    - Default Databricks artifact destination is `/Volumes/workspace/bixi-fs/models/inference`.
    - Updated `inference_artifacts.py` step-directory resolution to use the centralized helper.
    - Added `dbfs:/` and `dbfs:/Volumes/...` handling for champion model artifact path existence checks.
+13. Added historical return controls to final output shaping:
+   - `HISTORICAL_RETURN_STEPS` controls how many recent synthetic-history rows are returned.
+   - `joined_timestamp`, `joined_inflow`, and `joined_outflow` combine historical and model series.
 
 ### Pending (Remaining Work)
 1. No open milestone remains in the current Stage-10 scope.
@@ -133,5 +145,5 @@ Confirmed behavior:
    - `feature_rows.json` with schema/input coverage checks
 3. `feature_rows.json` reports no missing stage-06 transformed columns and no missing model input columns.
 4. Final output is written to `.../output/station_218.json`.
-5. Final payload includes exactly the required eight fields.
+5. Final payload includes station historical arrays, model forecast arrays, and joined arrays.
 6. `model_inflow` and `model_outflow` are populated from champion model scoring (not placeholders).

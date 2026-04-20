@@ -787,6 +787,10 @@ def load_observed_station_flow_history(
     request_ts_utc = to_utc_hour(request_ts_utc)
     start_ts_utc = request_ts_utc - timedelta(hours=lookback_hours + warmup_hours)
 
+    prior_year_offset = timedelta(days=365)
+    request_ts_utc = request_ts_utc - prior_year_offset
+    start_ts_utc = start_ts_utc - prior_year_offset
+
     safe_station_id = canonical_station_id.replace("'", "\\'")
     start_text = start_ts_utc.strftime("%Y-%m-%d %H:%M:%S")
     end_text = request_ts_utc.strftime("%Y-%m-%d %H:%M:%S")
@@ -813,7 +817,7 @@ def load_observed_station_flow_history(
         ts_raw = row["ts_hour"]
         if ts_raw is None:
             continue
-        ts_utc = to_utc_hour(ts_raw)
+        ts_utc = to_utc_hour(ts_raw) + prior_year_offset
         inflow = float(row["station_inflow"] or 0.0)
         outflow = float(row["station_outflow"] or 0.0)
         observed_by_ts[ts_utc] = (inflow, outflow)
