@@ -235,6 +235,8 @@ def write_summary_rows(spark, summary_rows: list[dict], summary_path: str, run_i
     dedupe_cols = ["run_id", "station_id", "target_col", "model_name", "model_path", "best_params_json"]
     try:
         existing_summary_df = spark.read.parquet(summary_path)
+        # Spark reads are lazy; trigger a tiny action so missing paths fail inside this try block.
+        existing_summary_df.limit(1).count()
         summary_df = (
             existing_summary_df
             .unionByName(incoming_summary_df, allowMissingColumns=True)
