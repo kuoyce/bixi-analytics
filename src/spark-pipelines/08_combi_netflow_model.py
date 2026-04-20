@@ -358,7 +358,6 @@ def main() -> None:
         F.col("station_id").asc(),
         F.col("asymmetric_rmse_mean").desc_nulls_last(),
     )
-    result_df = result_df.cache()
     result_df.count()
 
     combi_summary_path = build_storage_path(base_path, "models", "summary", "combi", run_id)
@@ -366,26 +365,33 @@ def main() -> None:
 
     combi_table_name = None
     if should_write_summary_tables():
-        catalog, schema, table, _ = resolve_summary_table_target(
+        catalog, schema, table, full_table_name = resolve_summary_table_target(
             default_table="combi",
             env_key="PIPELINE_TABLE_COMBI",
         )
-        combi_table_name = append_run_df_to_delta_table(
-            spark=spark,
-            df=result_df,
-            catalog=catalog,
-            schema=schema,
-            table=table,
-            run_id=run_id,
-            run_id_col="run_id",
-        )
+        try:
+            combi_table_name = append_run_df_to_delta_table(
+                spark=spark,
+                df=result_df,
+                catalog=catalog,
+                schema=schema,
+                table=table,
+                run_id=run_id,
+                run_id_col="run_id",
+            )
+        except ValueError as exc:
+            if "Duplicate run id detected" not in str(exc):
+                raise
+            run_id_sql = str(run_id).replace("'", "''")
+            spark.sql(f"DELETE FROM {full_table_name} WHERE run_id = '{run_id_sql}'")
+            result_df.write.format("delta").mode("append").saveAsTable(full_table_name)
+            combi_table_name = full_table_name
 
     print("=== Stage 08 Combi Eval results (preview) ===")
     print(f"Saved combi summary path: {combi_summary_path}")
     if combi_table_name:
         print(f"Appended combi summary table: {combi_table_name}")
     result_df.show(200, truncate=False)
-    result_df.unpersist()
 
     spark.stop()
 

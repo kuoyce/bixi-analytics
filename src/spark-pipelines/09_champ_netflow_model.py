@@ -33,6 +33,15 @@ def _set_env_if_provided(env_key: str, value: str | None) -> None:
     os.environ[env_key] = str(value)
 
 
+def is_missing_summary_path_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return (
+        "path does not exist" in message
+        or "path_not_found" in message
+        or "no such file or directory" in message
+    )
+
+
 def build_storage_path(base_path: str, *parts: str) -> str:
     base = base_path.rstrip("/")
     suffix = "/".join(str(p).strip("/") for p in parts)
@@ -65,8 +74,13 @@ def load_combi_summary_history(spark, base_path: str, exclude_run_id: str | None
 def load_current_champion(spark, base_path: str) -> DataFrame | None:
     champion_path = build_storage_path(base_path, "models", "summary", "champion", "current")
     try:
-        return spark.read.parquet(champion_path)
-    except Exception:
+        champion_df = spark.read.parquet(champion_path)
+        # Spark reads are lazy; force tiny action so missing paths fail inside this try block.
+        champion_df.limit(1).count()
+        return champion_df
+    except Exception as exc:
+        if not is_missing_summary_path_error(exc):
+            raise
         return None
 
 
@@ -210,14 +224,15 @@ def save_current_champion_if_enabled(
     champion_history_path = build_storage_path(base_path, "models", "summary", "champion", "history", run_id)
 
     if save_enabled:
-        current_df = champion_current_df.cache()
-        history_df = champion_history_df.cache()
-        current_df.count()
-        history_df.count()
+        # Materialize snapshots without cache/persist so serverless compute is supported,
+        # and break lineage with previous champion reads before overwrite.
+        spark = champion_current_df.sparkSession
+        current_rows = champion_current_df.collect()
+        history_rows = champion_history_df.collect()
+        current_df = spark.createDataFrame(current_rows, schema=champion_current_df.schema)
+        history_df = spark.createDataFrame(history_rows, schema=champion_history_df.schema)
         current_df.write.mode("overwrite").parquet(champion_current_path)
         history_df.write.mode("overwrite").parquet(champion_history_path)
-        current_df.unpersist()
-        history_df.unpersist()
 
     return save_enabled, champion_current_path, champion_history_path
 
@@ -263,19 +278,27 @@ def main() -> None:
 
     champion_history_table_name = None
     if should_write_summary_tables():
-        catalog, schema, table, _ = resolve_summary_table_target(
+        catalog, schema, table, full_table_name = resolve_summary_table_target(
             default_table="champion_history",
             env_key="PIPELINE_TABLE_CHAMPION_HISTORY",
         )
-        champion_history_table_name = append_run_df_to_delta_table(
-            spark=spark,
-            df=champion_history_df,
-            catalog=catalog,
-            schema=schema,
-            table=table,
-            run_id=run_id,
-            run_id_col="history_run_id",
-        )
+        try:
+            champion_history_table_name = append_run_df_to_delta_table(
+                spark=spark,
+                df=champion_history_df,
+                catalog=catalog,
+                schema=schema,
+                table=table,
+                run_id=run_id,
+                run_id_col="history_run_id",
+            )
+        except ValueError as exc:
+            if "Duplicate run id detected" not in str(exc):
+                raise
+            run_id_sql = str(run_id).replace("'", "''")
+            spark.sql(f"DELETE FROM {full_table_name} WHERE history_run_id = '{run_id_sql}'")
+            champion_history_df.write.format("delta").mode("append").saveAsTable(full_table_name)
+            champion_history_table_name = full_table_name
 
     print("=== Stage 09 Champion Select ===")
     print(f"Base path: {base_path}")
