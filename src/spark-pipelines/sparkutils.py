@@ -6,6 +6,21 @@ from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql.column import Column
 
+
+def _normalize_path(path: str) -> str:
+    return str(path).strip().rstrip("/")
+
+
+def _looks_like_table_identifier(target: str) -> bool:
+    value = str(target).strip()
+    if not value:
+        return False
+    if "/" in value:
+        return False
+    if value.startswith(("dbfs:/", "file:/", "s3://", "abfss://", "gs://")):
+        return False
+    return "." in value or value.startswith("`")
+
 def get_spark():
     if os.environ.get("DATABRICKS_RUNTIME_VERSION"):
         spark = SparkSession.builder.appName("Bixi Analytics").getOrCreate()
@@ -69,29 +84,73 @@ def resolve_project_root():
 
 def resolve_data_path():
     """
-    search for data path in current directory, if not available, then search for data path in project directory. 
-    else recursively search for data/ directory inside project directory.
+    Resolve the primary pipeline data path.
+
+    Priority:
+    1) BIXI_DATA_PATH env override
+    2) Databricks default schema root (/Volumes/<catalog>/<schema>)
+    3) local current/project-root discovered data directory
     """
-    
+
+    env_override = os.environ.get("BIXI_DATA_PATH")
+    if env_override and env_override.strip():
+        return _normalize_path(env_override)
+
     if os.environ.get("DATABRICKS_RUNTIME_VERSION"):
-        return "/Volumes/workspace/bixi-fs/"
-    else:
-        current_dir = os.path.dirname(os.path.abspath(__file__))
-        data_path = os.path.join(current_dir, "data")
-        if os.path.exists(data_path):
-            return data_path
-        
-        project_root = resolve_project_root()
-        data_path = os.path.join(project_root, "data")
-        if os.path.exists(data_path):
-            return data_path
-        
-        # recursively search for data/ directory inside project directory
-        for root, dirs, files in os.walk(project_root):
-            if "data" in dirs:
-                return os.path.join(root, "data")
-        
-        raise FileNotFoundError("Data directory not found in current directory or project directory.")
+        catalog = os.environ.get("DATABRICKS_VOLUME_CATALOG", "workspace").strip()
+        schema = os.environ.get("DATABRICKS_VOLUME_SCHEMA", "bixi-fs").strip()
+        return f"/Volumes/{catalog}/{schema}"
+
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    data_path = os.path.join(current_dir, "data")
+    if os.path.exists(data_path):
+        return _normalize_path(data_path)
+
+    project_root = resolve_project_root()
+    data_path = os.path.join(project_root, "data")
+    if os.path.exists(data_path):
+        return _normalize_path(data_path)
+
+    # recursively search for data/ directory inside project directory
+    for root, dirs, files in os.walk(project_root):
+        if "data" in dirs:
+            return _normalize_path(os.path.join(root, "data"))
+
+    raise FileNotFoundError("Data directory not found in current directory or project directory.")
+
+
+def resolve_databricks_volume_path(volume_name: str, *relative_parts: str) -> str:
+    """
+    Build a Databricks volume path under /Volumes/<catalog>/<schema>/<volume>/...
+    """
+    catalog = os.environ.get("DATABRICKS_VOLUME_CATALOG", "workspace").strip()
+    schema = os.environ.get("DATABRICKS_VOLUME_SCHEMA", "bixi-fs").strip()
+    cleaned_volume = str(volume_name).strip("/")
+    base = f"/Volumes/{catalog}/{schema}/{cleaned_volume}"
+    suffix = "/".join(str(part).strip("/") for part in relative_parts if str(part).strip())
+    return f"{base}/{suffix}" if suffix else base
+
+
+def resolve_inference_artifacts_root(base_data_path: str | None = None) -> str:
+    """
+    Resolve where inference run artifacts should be written/read.
+
+    - If INFERENCE_ARTIFACTS_ROOT is set, use it.
+    - On Databricks, default to workspace.bixi-fs.models.inference.*
+      -> /Volumes/workspace/bixi-fs/models/inference
+    - Locally, default to <data_path>/models/inference
+    """
+    root_override = os.environ.get("INFERENCE_ARTIFACTS_ROOT")
+    if root_override and root_override.strip():
+        return _normalize_path(root_override)
+
+    if is_databricks_runtime():
+        volume_name = os.environ.get("INFERENCE_VOLUME_NAME", "models").strip() or "models"
+        return _normalize_path(resolve_databricks_volume_path(volume_name, "inference"))
+
+    if base_data_path is None or not str(base_data_path).strip():
+        base_data_path = resolve_data_path()
+    return _normalize_path(os.path.join(str(base_data_path), "models", "inference"))
 
 
 def _str_to_bool(value: str | None, default: bool = False) -> bool:
@@ -228,12 +287,18 @@ def write_table(df, path: str, fmt: str = "parquet", mode: str = "overwrite", pa
     if maxRecordsPerFile:
         writer = writer.option("maxRecordsPerFile", maxRecordsPerFile)
     if fmt == "delta":
-        writer.format("delta").saveAsTable(path)
+        delta_writer = writer.format("delta")
+        if _looks_like_table_identifier(path):
+            delta_writer.saveAsTable(path)
+        else:
+            delta_writer.save(path)
     else:
         writer.parquet(path)
 
 def read_table(spark, path: str, fmt: str = "parquet"):
     if fmt == "delta":
+        if _looks_like_table_identifier(path):
+            return spark.table(path)
         return spark.read.format("delta").load(path)
     return spark.read.parquet(path)
 
