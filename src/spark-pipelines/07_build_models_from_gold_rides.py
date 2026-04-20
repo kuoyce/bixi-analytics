@@ -231,20 +231,8 @@ def write_summary_rows(spark, summary_rows: list[dict], summary_path: str, run_i
         return None
 
     incoming_summary_df = spark.createDataFrame(summary_rows)
-    summary_df = incoming_summary_df
     dedupe_cols = ["run_id", "station_id", "target_col", "model_name", "model_path", "best_params_json"]
-    try:
-        existing_summary_df = spark.read.parquet(summary_path)
-        # Spark reads are lazy; trigger a tiny action so missing paths fail inside this try block.
-        existing_summary_df.limit(1).count()
-        summary_df = (
-            existing_summary_df
-            .unionByName(incoming_summary_df, allowMissingColumns=True)
-            .dropDuplicates(dedupe_cols)
-        )
-    except Exception as exc:
-        if not is_missing_summary_path_error(exc):
-            raise
+    summary_df = incoming_summary_df.dropDuplicates(dedupe_cols)
 
     summary_df, summary_df_cached = persist_df_best_effort(
         summary_df,
@@ -252,7 +240,7 @@ def write_summary_rows(spark, summary_rows: list[dict], summary_path: str, run_i
         label="stage07 summary",
     )
     summary_df.count()
-    summary_df.write.mode("overwrite").parquet(summary_path)
+    summary_df.write.mode("append").parquet(summary_path)
 
     table_name = None
     if should_write_summary_tables():
@@ -275,7 +263,8 @@ def write_summary_rows(spark, summary_rows: list[dict], summary_path: str, run_i
                 raise
             run_id_sql = str(run_id).replace("'", "''")
             spark.sql(f"DELETE FROM {full_table_name} WHERE run_id = '{run_id_sql}'")
-            summary_df.write.format("delta").mode("append").saveAsTable(full_table_name)
+            run_summary_df = spark.read.parquet(summary_path).dropDuplicates(dedupe_cols)
+            run_summary_df.write.format("delta").mode("append").saveAsTable(full_table_name)
             table_name = full_table_name
 
     if summary_df_cached:
@@ -511,7 +500,7 @@ def main(target_col: str, sparkml_temp_dfs_path: str | None = None):
 
     base_path = resolve_data_path()
     run_id, run_ts = generate_run_metadata()
-    model_root_path = build_storage_path(base_path, "models", run_id)
+    model_root_path = build_storage_path(base_path, "models", "runs", run_id)
     flow_df, stations_df = load_gold_inputs(spark, base_path)
     station_id = resolve_single_target_station_id(stations_df)
     target_col = resolve_target_col(target_col)

@@ -284,7 +284,7 @@ def main() -> None:
     apply_local_spark_defaults(spark)
 
     base_path = resolve_data_path()
-    model_root_path = build_storage_path(base_path, "models")
+    model_root_path = build_storage_path(base_path, "models", "runs")
     flow_df, stations_df = load_gold_inputs(spark, base_path)
     station_ids = resolve_target_station_ids(stations_df)
 
