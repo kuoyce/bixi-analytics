@@ -45,6 +45,7 @@ HARD_CODED_STATION_IDS: list[str] = ['STN_0001', 'STN_0002', 'STN_0003', 'STN_00
 DEFAULT_SPARKML_TEMP_DFS_PATH = "/Volumes/workspace/bixi-fs/tmp/sparkml"
 ALLOWED_TARGET_COLS: set[str] = {"station_inflow", "station_outflow"}
 DEFAULT_TARGET_COL = "station_inflow"
+DEFAULT_CUTOFF_DATE = "2025-08-01"
 
 def load_gold_inputs(spark, base_path: str) -> tuple[DataFrame, DataFrame]:
     flow_df = spark.read.parquet(f"{base_path}/gold/station_flow")
@@ -69,6 +70,11 @@ def resolve_target_col(raw_value: str | None) -> str:
         )
 
     return target_col
+
+
+def resolve_cutoff_date(raw_value: str | None) -> str:
+    cutoff_date = (raw_value or "").strip()
+    return cutoff_date or DEFAULT_CUTOFF_DATE
 
 
 def resolve_target_station_ids(stations_df: DataFrame) -> list[str]:
@@ -144,7 +150,7 @@ def fillna_numerics_and_booleans(df: DataFrame, num_cols: list[str], bool_cols: 
     screen_df = df.fillna(fill_map)
     return screen_df
 
-def split_train_test_by_cutoff(df: DataFrame, cutoff_date = "2025-08-01"):
+def split_train_test_by_cutoff(df: DataFrame, cutoff_date: str = DEFAULT_CUTOFF_DATE):
     # split data
     train_df = df.filter(F.col("ts_hour") < cutoff_date)
     test_df  = df.filter(F.col("ts_hour") >= cutoff_date)
@@ -504,12 +510,14 @@ def main(target_col: str, sparkml_temp_dfs_path: str | None = None):
     flow_df, stations_df = load_gold_inputs(spark, base_path)
     station_id = resolve_single_target_station_id(stations_df)
     target_col = resolve_target_col(target_col)
+    cutoff_date = resolve_cutoff_date(os.environ.get("CUTOFF_DATE"))
 
     print(f"Run ID: {run_id}")
     print(f"Run TS (UTC): {run_ts}")
     print(f"Stage 07 CV folds: {os.environ.get('STAGE7_CV_NUM_FOLDS', '3')}")
     print(f"Stage 07 station id: {station_id}")
     print(f"Stage 07 target col: {target_col}")
+    print(f"Stage 07 cutoff date: {cutoff_date}")
 
     NUMERIC_COLS, CATEGORICAL_COLS, BOOLEAN_COLS, TIME_COL, TARGET_COL = get_columns(target_col=target_col)
     summary_rows = []
@@ -530,7 +538,7 @@ def main(target_col: str, sparkml_temp_dfs_path: str | None = None):
         # Filter the flow DataFrame for the specific station.
         station_flow_df = flow_df.filter(F.col("station_id") == station_id)
         station_df = fillna_numerics_and_booleans(station_flow_df, NUMERIC_COLS, BOOLEAN_COLS)
-        train_df, test_df = split_train_test_by_cutoff(station_df)
+        train_df, test_df = split_train_test_by_cutoff(station_df, cutoff_date=cutoff_date)
 
         reduced_categorical_cols, reduced_numeric_cols, importance_df = prune_feature_columns_with_random_forest(
             train_df=train_df,
@@ -701,6 +709,11 @@ if __name__ == "__main__":
         ),
         help="UC volume path used by Spark ML caching on shared/serverless Databricks clusters",
     )
+    parser.add_argument(
+        "--cutoff-date",
+        default=os.environ.get("CUTOFF_DATE", DEFAULT_CUTOFF_DATE),
+        help="Train/test split cutoff date (maps to CUTOFF_DATE)",
+    )
     args = parser.parse_args()
 
     _set_env_if_provided("PIPELINE_TARGET_COL", args.pipeline_target_col)
@@ -715,6 +728,7 @@ if __name__ == "__main__":
     _set_env_if_provided("PIPELINE_TABLE_CATALOG", args.pipeline_table_catalog)
     _set_env_if_provided("PIPELINE_TABLE_SCHEMA", args.pipeline_table_schema)
     _set_env_if_provided("PIPELINE_TABLE_SOLO", args.pipeline_table_solo)
+    _set_env_if_provided("CUTOFF_DATE", args.cutoff_date)
 
     main(
         target_col=args.pipeline_target_col,

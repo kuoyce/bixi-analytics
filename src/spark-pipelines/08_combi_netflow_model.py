@@ -24,12 +24,18 @@ from sparkutils import (
 )
 
 HARD_CODED_STATION_IDS: list[str] = ['STN_0001', 'STN_0002', 'STN_0003', 'STN_0004', 'STN_0005', 'STN_0006']
+DEFAULT_CUTOFF_DATE = "2025-08-01"
 
 
 def _set_env_if_provided(env_key: str, value: str | None) -> None:
     if value is None:
         return
     os.environ[env_key] = str(value)
+
+
+def resolve_cutoff_date(raw_value: str | None) -> str:
+    cutoff_date = (raw_value or "").strip()
+    return cutoff_date or DEFAULT_CUTOFF_DATE
 
 def build_storage_path(base_path: str, *parts: str) -> str:
     base = base_path.rstrip("/")
@@ -126,7 +132,7 @@ def fillna_numerics_and_booleans(df: DataFrame, num_cols: list[str], bool_cols: 
     return df.fillna(fill_map)
 
 
-def split_train_test_by_cutoff(df: DataFrame, cutoff_date: str = "2025-08-01") -> tuple[DataFrame, DataFrame]:
+def split_train_test_by_cutoff(df: DataFrame, cutoff_date: str = DEFAULT_CUTOFF_DATE) -> tuple[DataFrame, DataFrame]:
     train_df = df.filter(F.col("ts_hour") < cutoff_date)
     test_df = df.filter(F.col("ts_hour") >= cutoff_date)
     return train_df, test_df
@@ -285,6 +291,7 @@ def main() -> None:
 
     base_path = resolve_data_path()
     model_root_path = build_storage_path(base_path, "models", "runs")
+    cutoff_date = resolve_cutoff_date(os.environ.get("CUTOFF_DATE"))
     flow_df, stations_df = load_gold_inputs(spark, base_path)
     station_ids = resolve_target_station_ids(stations_df)
 
@@ -308,6 +315,7 @@ def main() -> None:
     print(f"Model root path: {model_root_path}")
     print(f"Current run id: {run_id}")
     print(f"Current run ts: {run_ts}")
+    print(f"Stage 08 cutoff date: {cutoff_date}")
     print(f"Stations to evaluate: {len(station_ids)}")
 
     results = []
@@ -327,7 +335,7 @@ def main() -> None:
 
         station_flow_df = flow_df.filter(F.col("station_id") == station_id)
         station_df = fillna_numerics_and_booleans(station_flow_df, numeric_cols, bool_cols)
-        _train_df, test_df = split_train_test_by_cutoff(station_df)
+        _train_df, test_df = split_train_test_by_cutoff(station_df, cutoff_date=cutoff_date)
 
         if test_df.limit(1).count() == 0:
             print(f"Skipping {station_id}: no test rows after cutoff")
@@ -448,6 +456,11 @@ if __name__ == "__main__":
         default=os.environ.get("PIPELINE_TABLE_COMBI", "combi"),
         help="Stage 08 summary table name (maps to PIPELINE_TABLE_COMBI)",
     )
+    parser.add_argument(
+        "--cutoff-date",
+        default=os.environ.get("CUTOFF_DATE", DEFAULT_CUTOFF_DATE),
+        help="Train/test split cutoff date (maps to CUTOFF_DATE)",
+    )
     args = parser.parse_args()
 
     _set_env_if_provided("PIPELINE_STATION_ID", args.pipeline_station_id)
@@ -460,5 +473,6 @@ if __name__ == "__main__":
     _set_env_if_provided("PIPELINE_TABLE_CATALOG", args.pipeline_table_catalog)
     _set_env_if_provided("PIPELINE_TABLE_SCHEMA", args.pipeline_table_schema)
     _set_env_if_provided("PIPELINE_TABLE_COMBI", args.pipeline_table_combi)
+    _set_env_if_provided("CUTOFF_DATE", args.cutoff_date)
 
     main()

@@ -14,6 +14,9 @@ import uuid
 from pathlib import Path
 
 
+DEFAULT_CUTOFF_DATE = "2025-08-01"
+
+
 def parse_station_ids(raw_value: str | None) -> list[str]:
     if not raw_value:
         return []
@@ -73,6 +76,11 @@ def main() -> None:
         default=sys.executable,
         help="Python executable used to launch stage scripts",
     )
+    parser.add_argument(
+        "--cutoff-date",
+        default=os.environ.get("CUTOFF_DATE", DEFAULT_CUTOFF_DATE),
+        help="Train/test split cutoff date shared by stages 07 and 08",
+    )
     args = parser.parse_args()
 
     run_id = args.run_id.strip() if args.run_id and args.run_id.strip() else build_default_run_id()
@@ -92,6 +100,7 @@ def main() -> None:
     env["PIPELINE_MODE"] = str(args.mode)
     env["PIPELINE_RUN_ID"] = run_id
     env["PIPELINE_RUN_TS"] = run_ts
+    env["CUTOFF_DATE"] = str(args.cutoff_date)
     if args.pipeline_station_id and args.pipeline_station_id.strip():
         env["PIPELINE_STATION_ID"] = args.pipeline_station_id.strip()
 
@@ -109,6 +118,7 @@ def main() -> None:
     print(f"PIPELINE_MODE: {env['PIPELINE_MODE']}")
     print(f"PIPELINE_RUN_ID: {run_id}")
     print(f"PIPELINE_RUN_TS: {run_ts}")
+    print(f"CUTOFF_DATE: {env['CUTOFF_DATE']}")
     print(f"PIPELINE_STATION_ID: {','.join(station_ids)}")
 
     for station_id in station_ids:
@@ -122,6 +132,8 @@ def main() -> None:
                     station_id,
                     "--pipeline-target-col",
                     target_col,
+                    "--cutoff-date",
+                    env["CUTOFF_DATE"],
                 ],
             )
 
@@ -129,6 +141,10 @@ def main() -> None:
         python_executable=args.python,
         script_path=stage08_script,
         env=env,
+        extra_args=[
+            "--cutoff-date",
+            env["CUTOFF_DATE"],
+        ],
     )
     run_stage(
         python_executable=args.python,
