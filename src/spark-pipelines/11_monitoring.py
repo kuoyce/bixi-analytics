@@ -37,6 +37,9 @@ DEFAULT_CUTOFF_DATE = "2025-08-01"
 DEFAULT_REFERENCE_WINDOW_DAYS = 28
 DEFAULT_RECENT_WINDOW_DAYS = 7
 DEFAULT_HOD_COS_BIN_COUNT = 20
+DEFAULT_THRESHOLD_COVARIATE_DRIFT_SCORE = 0.25
+DEFAULT_THRESHOLD_CONCEPT_RMSE_RATIO = 1.2
+DEFAULT_THRESHOLD_CONCEPT_MAE_RATIO = 1.05
 PSI_EPSILON = 1e-9
 
 
@@ -69,6 +72,17 @@ def resolve_positive_int(raw_value: str | None, default_value: int, field_name: 
         return default_value
 
     resolved = int(value)
+    if resolved <= 0:
+        raise ValueError(f"{field_name} must be positive. Got {resolved}")
+    return resolved
+
+
+def resolve_positive_float(raw_value: str | None, default_value: float, field_name: str) -> float:
+    value = (raw_value or "").strip()
+    if not value:
+        return default_value
+
+    resolved = float(value)
     if resolved <= 0:
         raise ValueError(f"{field_name} must be positive. Got {resolved}")
     return resolved
@@ -442,6 +456,21 @@ def main() -> None:
         DEFAULT_HOD_COS_BIN_COUNT,
         "MONITOR_HOD_COS_BIN_COUNT",
     )
+    threshold_covariate_drift_score = resolve_positive_float(
+        os.environ.get("MONITOR_THRESHOLD_COVARIATE_DRIFT_SCORE"),
+        DEFAULT_THRESHOLD_COVARIATE_DRIFT_SCORE,
+        "MONITOR_THRESHOLD_COVARIATE_DRIFT_SCORE",
+    )
+    threshold_concept_rmse_ratio = resolve_positive_float(
+        os.environ.get("MONITOR_THRESHOLD_CONCEPT_RMSE_RATIO"),
+        DEFAULT_THRESHOLD_CONCEPT_RMSE_RATIO,
+        "MONITOR_THRESHOLD_CONCEPT_RMSE_RATIO",
+    )
+    threshold_concept_mae_ratio = resolve_positive_float(
+        os.environ.get("MONITOR_THRESHOLD_CONCEPT_MAE_RATIO"),
+        DEFAULT_THRESHOLD_CONCEPT_MAE_RATIO,
+        "MONITOR_THRESHOLD_CONCEPT_MAE_RATIO",
+    )
 
     flow_df, stations_df = load_gold_inputs(spark, base_path)
     station_ids = resolve_target_station_ids(stations_df)
@@ -464,6 +493,9 @@ def main() -> None:
     print(f"Reference window days: {reference_window_days}")
     print(f"Recent window days: {recent_window_days}")
     print(f"Hod_cos bin count: {hod_cos_bin_count}")
+    print(f"Threshold covariate_drift_score: {threshold_covariate_drift_score}")
+    print(f"Threshold concept_rmse_ratio: {threshold_concept_rmse_ratio}")
+    print(f"Threshold concept_mae_ratio: {threshold_concept_mae_ratio}")
     print(f"Target station count: {len(station_ids)}")
     print(f"Champion station count: {len(champion_by_station)}")
 
@@ -485,6 +517,9 @@ def main() -> None:
                     "reference_window_days": reference_window_days,
                     "recent_window_days": recent_window_days,
                     "hod_cos_bin_count": hod_cos_bin_count,
+                    "threshold_covariate_drift_score": threshold_covariate_drift_score,
+                    "threshold_concept_rmse_ratio": threshold_concept_rmse_ratio,
+                    "threshold_concept_mae_ratio": threshold_concept_mae_ratio,
                     "champion_run_id": None,
                     "champion_run_ts": None,
                     "reference_start_ts": None,
@@ -507,6 +542,7 @@ def main() -> None:
                     "concept_inflow_model_path": None,
                     "concept_outflow_model_path": None,
                     "monitoring_status": "no_test_rows_after_cutoff",
+                    "monitoring_remarks": "No test rows after cutoff date.",
                 }
             )
             continue
@@ -545,10 +581,13 @@ def main() -> None:
         }
 
         monitoring_status = "ok"
+        monitoring_remarks = "Passed all configured thresholds."
         if reference_row_count == 0 or recent_row_count == 0:
             monitoring_status = "insufficient_reference_or_recent_rows"
+            monitoring_remarks = "Insufficient reference or recent rows for drift checks."
         elif champion_row is None:
             monitoring_status = "missing_champion_for_station"
+            monitoring_remarks = "Champion model paths missing for station."
         else:
             concept_metrics = compute_concept_drift_metrics(
                 reference_df=reference_df,
@@ -556,6 +595,40 @@ def main() -> None:
                 inflow_model_path=champion_row["inflow_model_path"],
                 outflow_model_path=champion_row["outflow_model_path"],
             )
+
+            fail_reasons: list[str] = []
+            covariate_drift_score = cov_metrics["covariate_drift_score"]
+            concept_rmse_ratio = concept_metrics["concept_rmse_ratio"]
+            concept_mae_ratio = concept_metrics["concept_mae_ratio"]
+
+            if (
+                covariate_drift_score is not None
+                and covariate_drift_score > threshold_covariate_drift_score
+            ):
+                fail_reasons.append(
+                    "covariate_drift_score "
+                    f"{covariate_drift_score:.6f} > threshold {threshold_covariate_drift_score:.6f}"
+                )
+            if (
+                concept_rmse_ratio is not None
+                and concept_rmse_ratio > threshold_concept_rmse_ratio
+            ):
+                fail_reasons.append(
+                    "concept_rmse_ratio "
+                    f"{concept_rmse_ratio:.6f} > threshold {threshold_concept_rmse_ratio:.6f}"
+                )
+            if (
+                concept_mae_ratio is not None
+                and concept_mae_ratio > threshold_concept_mae_ratio
+            ):
+                fail_reasons.append(
+                    "concept_mae_ratio "
+                    f"{concept_mae_ratio:.6f} > threshold {threshold_concept_mae_ratio:.6f}"
+                )
+
+            if fail_reasons:
+                monitoring_status = "fail"
+                monitoring_remarks = "; ".join(fail_reasons)
 
         monitoring_rows.append(
             {
@@ -566,6 +639,9 @@ def main() -> None:
                 "reference_window_days": reference_window_days,
                 "recent_window_days": recent_window_days,
                 "hod_cos_bin_count": hod_cos_bin_count,
+                "threshold_covariate_drift_score": threshold_covariate_drift_score,
+                "threshold_concept_rmse_ratio": threshold_concept_rmse_ratio,
+                "threshold_concept_mae_ratio": threshold_concept_mae_ratio,
                 "champion_run_id": champion_row["run_id"] if champion_row is not None else None,
                 "champion_run_ts": champion_row["run_ts"] if champion_row is not None else None,
                 "reference_start_ts": reference_start,
@@ -588,6 +664,7 @@ def main() -> None:
                 "concept_inflow_model_path": champion_row["inflow_model_path"] if champion_row is not None else None,
                 "concept_outflow_model_path": champion_row["outflow_model_path"] if champion_row is not None else None,
                 "monitoring_status": monitoring_status,
+                "monitoring_remarks": monitoring_remarks,
             }
         )
 
@@ -685,6 +762,30 @@ if __name__ == "__main__":
         default=os.environ.get("MONITOR_HOD_COS_BIN_COUNT", str(DEFAULT_HOD_COS_BIN_COUNT)),
         help="Bin count for hod_cos PSI (maps to MONITOR_HOD_COS_BIN_COUNT)",
     )
+    parser.add_argument(
+        "--monitor-threshold-covariate-drift-score",
+        default=os.environ.get(
+            "MONITOR_THRESHOLD_COVARIATE_DRIFT_SCORE",
+            str(DEFAULT_THRESHOLD_COVARIATE_DRIFT_SCORE),
+        ),
+        help="Fail threshold for covariate_drift_score (maps to MONITOR_THRESHOLD_COVARIATE_DRIFT_SCORE)",
+    )
+    parser.add_argument(
+        "--monitor-threshold-concept-rmse-ratio",
+        default=os.environ.get(
+            "MONITOR_THRESHOLD_CONCEPT_RMSE_RATIO",
+            str(DEFAULT_THRESHOLD_CONCEPT_RMSE_RATIO),
+        ),
+        help="Fail threshold for concept_rmse_ratio (maps to MONITOR_THRESHOLD_CONCEPT_RMSE_RATIO)",
+    )
+    parser.add_argument(
+        "--monitor-threshold-concept-mae-ratio",
+        default=os.environ.get(
+            "MONITOR_THRESHOLD_CONCEPT_MAE_RATIO",
+            str(DEFAULT_THRESHOLD_CONCEPT_MAE_RATIO),
+        ),
+        help="Fail threshold for concept_mae_ratio (maps to MONITOR_THRESHOLD_CONCEPT_MAE_RATIO)",
+    )
     args = parser.parse_args()
 
     _set_env_if_provided("PIPELINE_STATION_ID", args.pipeline_station_id)
@@ -702,5 +803,17 @@ if __name__ == "__main__":
     _set_env_if_provided("MONITOR_REFERENCE_WINDOW_DAYS", args.monitor_reference_window_days)
     _set_env_if_provided("MONITOR_RECENT_WINDOW_DAYS", args.monitor_recent_window_days)
     _set_env_if_provided("MONITOR_HOD_COS_BIN_COUNT", args.monitor_hod_cos_bin_count)
+    _set_env_if_provided(
+        "MONITOR_THRESHOLD_COVARIATE_DRIFT_SCORE",
+        args.monitor_threshold_covariate_drift_score,
+    )
+    _set_env_if_provided(
+        "MONITOR_THRESHOLD_CONCEPT_RMSE_RATIO",
+        args.monitor_threshold_concept_rmse_ratio,
+    )
+    _set_env_if_provided(
+        "MONITOR_THRESHOLD_CONCEPT_MAE_RATIO",
+        args.monitor_threshold_concept_mae_ratio,
+    )
 
     main()
