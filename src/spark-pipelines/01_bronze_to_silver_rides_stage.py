@@ -1,7 +1,7 @@
 import os
 
 from pyspark.sql.types import StructType, StructField, StringType, DoubleType
-from pyspark.sql.functions import col, to_timestamp, from_unixtime, year
+from pyspark.sql.functions import col, to_timestamp, from_unixtime, year, when
 
 from sparkutils import get_spark, resolve_data_path, read_table, write_table, apply_local_spark_defaults
 
@@ -61,6 +61,27 @@ def main():
     rides_df = rides_df.withColumn("start_time_ms", to_timestamp(from_unixtime(col("start_time_ms") / 1000)))
     rides_df = rides_df.withColumn("end_time_ms", to_timestamp(from_unixtime(col("end_time_ms") / 1000)))
     rides_df = rides_df.withColumn("ride_year", year(col("start_time_ms")))
+
+    # compute trip duration in minutes
+    rides_df = rides_df.withColumn(
+        "trip_duration_minutes",
+        (col("end_time_ms").cast("long") - col("start_time_ms").cast("long")) / 60.0,
+    )
+
+    # drop rows with null durations and record counts for reporting
+    rides_df = rides_df.filter(col("trip_duration_minutes").isNotNull())
+    pre_filter_count = rides_df.count()
+
+    # remove trips shorter than 2 minutes
+    rides_df = rides_df.filter(col("trip_duration_minutes") >= 2.0)
+
+    # remove the top 1% longest trips (99th percentile) as outliers
+    quantiles = rides_df.approxQuantile("trip_duration_minutes", [0.99], 0.001)
+    p99 = float(quantiles[0]) if quantiles and len(quantiles) > 0 else None
+    if p99 is not None:
+        rides_df = rides_df.filter(col("trip_duration_minutes") <= p99)
+
+    post_filter_count = rides_df.count()
 
     target_repartition = int(os.environ.get("STAGE1_REPARTITION_PARTITIONS", "0"))
     if target_repartition > 0:
